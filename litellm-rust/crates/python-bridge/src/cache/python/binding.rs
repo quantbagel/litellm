@@ -127,7 +127,6 @@ enum Pending {
 
 struct Granted {
     access: Py<PyAny>,
-    arguments: Py<PyDict>,
 }
 
 fn cache_hit(hit: &Bound<'_, PyAny>) -> PyResult<Option<CacheHit>> {
@@ -178,7 +177,6 @@ impl PythonCache {
         };
         self.granted = Some(Granted {
             access: access.unbind(),
-            arguments: arguments.clone().unbind(),
         });
         Ok(Some(policy))
     }
@@ -188,7 +186,6 @@ impl PythonCache {
             PyRuntimeError::new_err("cache operation without granted cache access")
         })?;
         let access = granted.access.bind(py);
-        let arguments = granted.arguments.bind(py);
         let function = |name: &str| py.import(self.module)?.getattr(name);
         let (pending, result) = match call {
             CacheCall::Lookup { reply } => (
@@ -198,12 +195,12 @@ impl PythonCache {
                 } else {
                     "lookup"
                 })
-                .and_then(|lookup| lookup.call1((access, arguments))),
+                .and_then(|lookup| lookup.call1((access,))),
             ),
             CacheCall::Store { value, reply } => (
                 Pending::Store(reply),
                 function(if self.asynchronous { "astore" } else { "store" })
-                    .and_then(|store| store.call1((access, to_py(py, &value)?, arguments))),
+                    .and_then(|store| store.call1((access, to_py(py, &value)?))),
             ),
         };
         let result = result.map(Bound::unbind);
@@ -253,8 +250,7 @@ impl PythonCache {
         let Some(granted) = &self.granted else {
             return Ok(());
         };
-        visit.call(&granted.access)?;
-        visit.call(&granted.arguments)
+        visit.call(&granted.access)
     }
 }
 
@@ -276,10 +272,7 @@ mod tests {
         Python::attach(|py| {
             let mut cache = PythonCache {
                 module: "litellm_missing_cache_host",
-                granted: Some(Granted {
-                    access: py.None(),
-                    arguments: PyDict::new(py).unbind(),
-                }),
+                granted: Some(Granted { access: py.None() }),
                 pending: None,
                 asynchronous,
             };

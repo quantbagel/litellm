@@ -21,12 +21,13 @@ from tests.test_litellm_rust.support.caching import (
 )
 from tests.test_litellm_rust.support.callback_recorder import RecordingLogger, drain_logging, request_body
 from tests.test_litellm_rust.support.recording_server import RecordingServer, ResponseSpec
-from tests.test_litellm_rust.support.results import cache_key, stored_cache_key
+from tests.test_litellm_rust.support.results import cache_key, consume, stored_cache_key
 from tests.test_litellm_rust.support.routing import assert_served_natively, routed
 
 pytestmark = pytest.mark.requires_rust_extension
 
 _OBJECT: Final = TypeAdapter(dict[str, object])
+_CHUNKS: Final = TypeAdapter(list[bytes])
 STREAM: Final = ResponseSpec(body=None, events=MESSAGES_EVENTS)
 EMPTY: Final = {**MESSAGES_RESPONSE, "content": []}
 OWN_CALL_TYPES: Final = ("anthropic_messages",)
@@ -37,11 +38,11 @@ def body(response: object) -> Mapping[str, object]:
 
 
 async def collect(stream: object) -> bytes:
-    assert isinstance(stream, AsyncIterator)
-    chunks: Final = [chunk async for chunk in stream]
+    streamed_async: Final = isinstance(stream, AsyncIterator)
+    collected: Final = _CHUNKS.validate_python(list(await consume(stream)), strict=True)
+    assert streamed_async
     await settle_cache_writes()
-    assert all(isinstance(chunk, bytes) for chunk in chunks)
-    return b"".join(TypeAdapter(list[bytes]).validate_python(chunks))
+    return b"".join(collected)
 
 
 @pytest.mark.parametrize("asynchronous", (False, True))
@@ -76,17 +77,22 @@ async def test_a_completed_native_stream_is_replayed_from_the_python_cache(call:
 
 
 @pytest.mark.parametrize("native_writes", (True, False), ids=("native-writes", "python-writes"))
+@pytest.mark.parametrize(
+    "options",
+    ({}, {"metadata": None}, {"cache_key": "shared-entry"}),
+    ids=("plain", "metadata-none", "preset-key"),
+)
 @pytest.mark.usefixtures("cache")
 async def test_native_and_python_replay_each_others_stream_entries(
-    call: Call, server: RecordingServer, native_writes: bool
+    call: Call, server: RecordingServer, native_writes: bool, options: Mapping[str, object]
 ) -> None:
     server.serve(STREAM)
 
     async def stream(native: bool) -> bytes:
         if native:
-            return await collect(await call(stream=True))
+            return await collect(await call(stream=True, **options))
         with routed():
-            return await collect(await call(stream=True))
+            return await collect(await call(stream=True, **options))
 
     first: Final = await stream(native_writes)
     second: Final = await stream(not native_writes)
