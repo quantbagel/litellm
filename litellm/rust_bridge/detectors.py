@@ -334,6 +334,10 @@ def _request_success_callbacks(request: NativeCall) -> tuple[object, ...]:
     return (*supplied, *(dynamic or ()))
 
 
+def deployment_success_hook() -> bool:
+    return _overridden("async_post_call_success_deployment_hook", litellm.callbacks)
+
+
 def pre_request_hook(_request: NativeCall) -> bool:
     return _overridden("async_pre_request_hook", litellm.callbacks)
 

@@ -546,6 +546,7 @@ impl Interceptors<RouteError> for CacheHitAccounting {
             InterceptRequest::AfterProviderResponse { raw, reply } => {
                 reply.send(self.after_provider_response(raw).await?);
             }
+            other => other.pass_through(),
         }
         Ok(())
     }

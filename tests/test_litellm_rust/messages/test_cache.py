@@ -5,9 +5,13 @@ from typing import Final
 import pytest
 from pydantic import TypeAdapter
 
+import litellm
 from litellm.caching.caching import Cache, CacheMode
 from litellm.caching.in_memory_cache import InMemoryCache
+from litellm.integrations.custom_logger import CustomLogger
 from litellm.types.caching import CachingSupportedCallTypes, LiteLLMCacheType
+from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
+from litellm.types.utils import LLMResponseTypes
 from tests.test_litellm_rust.messages.data import MESSAGES_EVENTS, MESSAGES_MODEL, MESSAGES_RESPONSE
 from tests.test_litellm_rust.support.caching import (
     Call,
@@ -20,13 +24,15 @@ from tests.test_litellm_rust.support.caching import (
     use_cache,
 )
 from tests.test_litellm_rust.support.callback_recorder import RecordingLogger, drain_logging, request_body
+from tests.test_litellm_rust.support.isolation import rebound
 from tests.test_litellm_rust.support.recording_server import RecordingServer, ResponseSpec
-from tests.test_litellm_rust.support.results import cache_key, consume, stored_cache_key
+from tests.test_litellm_rust.support.results import cache_key, consume, response_id, stored_cache_key
 from tests.test_litellm_rust.support.routing import assert_served_natively, routed
 
 pytestmark = pytest.mark.requires_rust_extension
 
 _OBJECT: Final = TypeAdapter(dict[str, object])
+_MESSAGE: Final = TypeAdapter(AnthropicMessagesResponse)
 _CHUNKS: Final = TypeAdapter(list[bytes])
 STREAM: Final = ResponseSpec(body=None, events=MESSAGES_EVENTS)
 EMPTY: Final = {**MESSAGES_RESPONSE, "content": []}
@@ -459,3 +465,33 @@ async def test_a_native_hit_reports_the_key_the_entry_is_stored_under(
     (stored,) = backend.cache_dict
     assert cache_key(hit) == stored_cache_key(hit) == stored
     assert_served_natively(server, count=1)
+
+
+@pytest.mark.parametrize("served", ("native", "python"))
+@pytest.mark.usefixtures("cache")
+async def test_a_hit_returns_what_the_success_deployment_hook_handed_the_first_caller(
+    call: Call, server: RecordingServer, served: str
+) -> None:
+    class Replace(CustomLogger):
+        calls = 0
+
+        async def async_post_call_success_deployment_hook(
+            self, request_data: dict[str, object], response: object, call_type: object
+        ) -> LLMResponseTypes | None:
+            Replace.calls += 1
+            return _MESSAGE.validate_python({**_OBJECT.validate_python(response), "id": f"hooked-{Replace.calls}"})
+
+    async def ask() -> object:
+        if served == "native":
+            return await call()
+        with routed():
+            return await call()
+
+    with rebound(litellm, "callbacks", [Replace()]):
+        first: Final = await ask()
+        second: Final = await ask()
+
+    assert len(server.requests) == 1
+    assert response_id(first) == "hooked-1"
+    assert response_id(second) == "hooked-1"
+    assert Replace.calls == 1

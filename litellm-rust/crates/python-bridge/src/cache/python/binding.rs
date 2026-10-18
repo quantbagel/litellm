@@ -67,6 +67,22 @@ impl<H: PythonBinding> PythonBinding for CachedBinding<H> {
         self.inner.encode_response(py, response)
     }
 
+    fn public_response(
+        &mut self,
+        py: Python<'_>,
+        response: &serde_json::Value,
+    ) -> PyResult<Py<PyAny>> {
+        self.inner.public_response(py, response)
+    }
+
+    fn response_value(
+        &mut self,
+        py: Python<'_>,
+        public: &Bound<'_, PyAny>,
+    ) -> PyResult<serde_json::Value> {
+        self.inner.response_value(py, public)
+    }
+
     fn encode_stream_head(
         &mut self,
         py: Python<'_>,

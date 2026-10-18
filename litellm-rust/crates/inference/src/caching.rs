@@ -186,7 +186,11 @@ where
         observers,
     )
     .await?;
-    if from_provider && let Some(session) = session {
+    if !from_provider {
+        return Ok(response);
+    }
+    let response = interceptors.provider_result(response).await?;
+    if let Some(session) = session {
         session.store_response::<P>(&response).await;
     }
     Ok(response)
@@ -225,7 +229,27 @@ where
         observers,
     )
     .await?;
+    let output = provider_result::<P>(output, &source, interceptors).await?;
     Ok(cache.finish(output, &source).await)
+}
+
+/// Offers a complete provider response to the host before it is cached or delivered. A cache
+/// hit and a stream pass through untouched.
+pub async fn provider_result<P>(
+    output: OutputOf<P>,
+    source: &ResultSource,
+    interceptors: &impl Interceptors<RouteError>,
+) -> Result<OutputOf<P>, RouteError>
+where
+    P: Protocol<Error = RouteError>,
+    P::Response: Serialize + DeserializeOwned,
+{
+    match (source, output) {
+        (ResultSource::Provider, CallOutput::Complete(response)) => Ok(CallOutput::Complete(
+            interceptors.provider_result(response).await?,
+        )),
+        (_, output) => Ok(output),
+    }
 }
 
 pub struct CallCache<P> {
