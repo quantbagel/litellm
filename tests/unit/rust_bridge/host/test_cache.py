@@ -41,7 +41,10 @@ MESSAGES_EVENTS: Final = (
     'event: message_stop\ndata: {"type":"message_stop"}\n\n',
 )
 RAW_ENTRY: Final = EntryFormat(
-    entry=RESPONSE_ENTRY.entry, output=lambda entry, _: ResponseOutput(value=entry), tiered_writes=True
+    entry=RESPONSE_ENTRY.entry,
+    output=lambda entry, _: ResponseOutput(value=entry),
+    tiers_responses=True,
+    tiers_streams=False,
 )
 
 
@@ -84,7 +87,7 @@ def stored_entry(cache: Cache, request: dict[str, object]) -> object:
     return None if hit is None else hit.response["value"]
 
 
-async def memory_entry(memory_tier: DualCache, key: str) -> object:
+async def memory_entry(memory_tier: DualCache, key: object) -> object:
     return await memory_tier.in_memory_cache.async_get_cache(key)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]  # InMemoryCache.async_get_cache is unannotated
 
 
@@ -255,16 +258,54 @@ async def test_async_store_routes_writes_and_skips_responses_without_output() ->
 
 
 @pytest.mark.asyncio
-async def test_async_store_omits_the_memory_tier_when_tiered_writes_are_disabled() -> None:
+@pytest.mark.parametrize(
+    ("entry_format", "request_kwargs", "output", "tiered"),
+    (
+        (RESPONSE_ENTRY, REQUEST, ResponseOutput(value={"id": "cached"}), True),
+        (MESSAGES_ENTRY, REQUEST, ResponseOutput(value={"id": "cached"}), False),
+        (MESSAGES_ENTRY, STREAM_REQUEST, StreamOutput(value="".join(MESSAGES_EVENTS)), True),
+    ),
+    ids=("response", "messages-response", "messages-stream"),
+)
+async def test_an_async_store_reaches_the_worker_memory_tier_as_the_python_route_does(
+    entry_format: EntryFormat,
+    request_kwargs: dict[str, object],
+    output: ResponseOutput | StreamOutput,
+    tiered: bool,
+) -> None:
     cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
     memory_tier: Final = DualCache(in_memory_cache=InMemoryCache())
-    cache_access: Final = _cache_access(cache, memory_tier=memory_tier, entry_format=MESSAGES_ENTRY)
+    cache_access: Final = _cache_access(cache, request_kwargs, memory_tier, entry_format)
 
-    await astore(cache_access, response_output({"id": "cached"}))
+    await astore(cache_access, output.model_dump())
     await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
 
-    assert stored_entry(cache, REQUEST) == {"id": "cached"}
-    assert await memory_entry(memory_tier, cache_access.key) is None
+    assert (await memory_entry(memory_tier, cache_access.key) is not None) is tiered
+    assert (stored_entry(cache, request_kwargs) is not None) is not tiered
+
+
+@pytest.mark.asyncio
+async def test_only_a_redis_backed_cache_answers_from_the_worker_memory_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    request: Final = {**REQUEST, "messages": [{"role": "user", "content": "worker tier"}]}
+    configure(monkeypatch, Cache(type=LiteLLMCacheType.REDIS, host="127.0.0.1", port="1"))
+    redis_access: Final = access(request, "acompletion")
+    configure(monkeypatch, Cache(type=LiteLLMCacheType.LOCAL))
+    local_access: Final = access(request, "acompletion")
+    assert redis_access is not None and local_access is not None
+
+    await astore(redis_access, response_output({"id": "from-the-worker"}))
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
+    hit: Final = await alookup(redis_access)
+
+    assert hit is not None
+    assert hit.response == response_output({"id": "from-the-worker"})
+    assert local_access.memory_tier is None
+
+
+def test_cache_controls_that_cannot_be_read_grant_no_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    configure(monkeypatch, Cache(type=LiteLLMCacheType.LOCAL))
+
+    assert access({**REQUEST, "cache": {1: True}}, "acompletion") is None
 
 
 def test_a_messages_stream_is_stored_as_the_legacy_event_list_and_replayed() -> None:

@@ -270,9 +270,9 @@ def cache_key_kwargs(kwargs: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def response_cache_key(cache: Cache, kwargs: Mapping[str, object]) -> str:
+def response_cache_key(cache: Cache, kwargs: Mapping[str, object]) -> object:
     preset: Final = kwargs.get("cache_key")
-    return preset if isinstance(preset, str) and preset else cache.get_cache_key(**cache_key_kwargs(kwargs))
+    return preset if preset else cache.get_cache_key(**cache_key_kwargs(kwargs))
 
 
 def _set_cached_hidden_param(response: object, key: str, value: object) -> None:
@@ -325,7 +325,7 @@ class LLMCachingHandler:
         self.async_streaming_chunks: list[object] = []
         self.sync_streaming_chunks: list[object] = []
         self.request_kwargs = _drop_logging_obj_from_kwargs(request_kwargs)
-        self.preset_cache_key: str | None = None
+        self.preset_cache_key: object = None
         self.original_function = original_function
         self.start_time = start_time
         self.dual_cache: DualCache | None = None if litellm.cache is None else response_memory_tier(litellm.cache)
@@ -500,14 +500,13 @@ class LLMCachingHandler:
             )
             if new_kwargs.get("metadata") is None:
                 new_kwargs.pop("metadata", None)
-            self.preset_cache_key = response_cache_key(litellm.cache, new_kwargs)
-            if new_kwargs.get("stream") is True:
-                new_kwargs["cache_key"] = self.preset_cache_key
+            if new_kwargs.get("stream") is True and "cache_key" not in new_kwargs:
+                new_kwargs["cache_key"] = litellm.cache.get_cache_key(**new_kwargs)
             self.request_kwargs = _drop_logging_obj_from_kwargs(new_kwargs)
             print_verbose("Checking Sync Cache")
             logging_obj.reset_caching_details()
             with response_cache_phase("get"):
-                cached_result = litellm.cache.get_cache(cache_key=self.preset_cache_key, **cache_key_kwargs(new_kwargs))
+                cached_result = litellm.cache.get_cache(**new_kwargs)
             if is_response_without_output(cached_result):
                 verbose_logger.debug("LiteLLM Cache: cached response has no output, treating it as a miss")
                 return CachingHandlerResponse(cached_result=None)
@@ -923,7 +922,7 @@ class LLMCachingHandler:
         if _is_response_cache_excluded(model=model, kwargs=new_kwargs):
             return None
         if new_kwargs.get("stream") is True and "cache_key" not in new_kwargs:
-            new_kwargs["cache_key"] = response_cache_key(litellm.cache, new_kwargs)
+            new_kwargs["cache_key"] = litellm.cache.get_cache_key(**new_kwargs)
         cached_result: object | None = None
         if call_type == CallTypes.aembedding.value:
             new_kwargs["input"] = self.handle_kwargs_input_list_or_str(new_kwargs)
