@@ -8,7 +8,7 @@ from pydantic import TypeAdapter
 from litellm.caching.caching import Cache, CacheMode
 from litellm.caching.in_memory_cache import InMemoryCache
 from litellm.types.caching import CachingSupportedCallTypes, LiteLLMCacheType
-from tests.test_litellm_rust.messages.data import MESSAGES_EVENTS, MESSAGES_RESPONSE
+from tests.test_litellm_rust.messages.data import MESSAGES_EVENTS, MESSAGES_MODEL, MESSAGES_RESPONSE
 from tests.test_litellm_rust.support.caching import (
     Call,
     CallerCache,
@@ -74,6 +74,30 @@ async def test_a_completed_native_stream_is_replayed_from_the_python_cache(call:
     assert first == b"".join(STREAM.payloads())
     assert second == first
     assert_served_natively(server, count=1)
+
+
+@pytest.mark.usefixtures("cache")
+async def test_prompts_passed_positionally_get_their_own_entries(server: RecordingServer) -> None:
+    from litellm.messages import anthropic_messages
+
+    server.expect(2)
+
+    async def ask(content: str) -> object:
+        return await anthropic_messages(
+            64,
+            [{"role": "user", "content": content}],
+            MESSAGES_MODEL,
+            api_key="test-key",
+            api_base=server.base_url,
+        )
+
+    await ask("first prompt")
+    second: Final = await ask("second prompt")
+    await settle_cache_writes()
+
+    assert len(server.requests) == 2
+    assert cache_key(second) is None
+    assert_served_natively(server, count=2)
 
 
 @pytest.mark.parametrize("native_writes", (True, False), ids=("native-writes", "python-writes"))

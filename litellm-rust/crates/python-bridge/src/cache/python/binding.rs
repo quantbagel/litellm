@@ -3,7 +3,7 @@ use litellm_cache::Error;
 use litellm_cache_response::{CacheHit, CachePolicy};
 use litellm_host::protocol::{Protocol, Reply};
 use litellm_host_python::{
-    InvokeError, PythonBinding, PythonHostCalls, PythonOwned, from_py, to_py,
+    InvokeError, PythonBinding, PythonHostCalls, PythonOwned, effective_py_args, from_py, to_py,
 };
 use pyo3::{
     exceptions::{PyException, PyRuntimeError},
@@ -18,14 +18,21 @@ pub(crate) struct CachedBinding<H> {
     inner: H,
     cache: PythonCache,
     call_type: &'static str,
+    positional: Option<Py<PyDict>>,
 }
 
 impl<H> CachedBinding<H> {
-    pub(crate) fn new(inner: H, call_type: &'static str, asynchronous: bool) -> Self {
+    pub(crate) fn new(
+        inner: H,
+        call_type: &'static str,
+        asynchronous: bool,
+        positional: Py<PyDict>,
+    ) -> Self {
         Self {
             inner,
             cache: PythonCache::new(asynchronous),
             call_type,
+            positional: Some(positional),
         }
     }
 }
@@ -43,8 +50,11 @@ impl<H: PythonBinding> PythonBinding for CachedBinding<H> {
     ) -> Result<<Self::Protocol as Protocol>::Request, InvokeError<ErrorOf<H>>> {
         let request = self.inner.decode_request(py, arguments)?;
         let policy = self
-            .cache
-            .configure(py, arguments, self.call_type)
+            .positional
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("cache binding used after close"))
+            .and_then(|positional| effective_py_args(positional.bind(py), arguments))
+            .and_then(|keyed| self.cache.configure(py, &keyed, self.call_type))
             .map_err(InvokeError::Python)?;
         Ok((request, policy))
     }
@@ -112,11 +122,16 @@ impl<H: PythonOwned> PythonOwned for CachedBinding<H> {
     fn close(&mut self, py: Python<'_>) {
         self.inner.close(py);
         self.cache.close();
+        self.positional = None;
     }
 
     fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         self.inner.traverse(visit)?;
-        self.cache.traverse(visit)
+        self.cache.traverse(visit)?;
+        if let Some(positional) = &self.positional {
+            visit.call(positional)?;
+        }
+        Ok(())
     }
 }
 
