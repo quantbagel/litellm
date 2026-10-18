@@ -4035,6 +4035,7 @@ dependencies = [
  "litellm-http",
  "litellm-inference",
  "litellm-inference-testing",
+ "litellm-integrations",
  "litellm-llms",
  "litellm-llms-types",
  "litellm-router-types",
@@ -4139,6 +4140,16 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "litellm-integrations"
+version = "0.1.0"
+dependencies = [
+ "litellm-llms-types",
+ "rstest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

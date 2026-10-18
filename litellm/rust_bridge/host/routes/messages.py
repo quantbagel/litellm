@@ -50,6 +50,10 @@ class MessagesSettings:
     reasoning_auto_summary: bool
     additional_drop_params: Sequence[str]
     request_timeout: float | None
+    cache_control_injection_points: Sequence[Mapping[str, object]]
+    enable_prompt_caching: bool
+    prompt_caching_ttl: str | None
+    user_agent: str | None
 
 
 def response(value: Mapping[str, object]) -> AnthropicMessagesResponse:
@@ -95,6 +99,31 @@ def _additional_drop_params(kwargs: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(path for path in configured if isinstance(path, str))
 
 
+def _cache_control_injection_points(kwargs: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    value: Final = kwargs.get("cache_control_injection_points")
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _user_agent(kwargs: Mapping[str, object]) -> str | None:
+    request: Final = kwargs.get("proxy_server_request")
+    if not isinstance(request, Mapping):
+        return None
+    headers: Final = request.get("headers")
+    if not isinstance(headers, Mapping):
+        return None
+    for key, value in headers.items():
+        if isinstance(key, str) and key.lower() == "user-agent" and isinstance(value, str):
+            return value
+    return None
+
+
+def _prompt_caching_ttl() -> str | None:
+    value: Final = getattr(litellm, "anthropic_prompt_caching_ttl", None)
+    return value if value in ("5m", "1h") else None
+
+
 def settings(kwargs: Mapping[str, object]) -> dict[str, object]:
     return asdict(
         MessagesSettings(
@@ -102,5 +131,16 @@ def settings(kwargs: Mapping[str, object]) -> dict[str, object]:
             reasoning_auto_summary=is_reasoning_auto_summary_enabled(),
             additional_drop_params=_additional_drop_params(kwargs),
             request_timeout=get_configured_request_timeout(),
+            cache_control_injection_points=_cache_control_injection_points(kwargs),
+            enable_prompt_caching=kwargs.get("enable_prompt_caching") is True
+            or litellm.enable_anthropic_prompt_caching is True,
+            prompt_caching_ttl=_prompt_caching_ttl(),
+            user_agent=_user_agent(kwargs),
         )
     )
+
+
+def record_gateway_injection(arguments: Mapping[str, object], added: int) -> None:
+    from litellm.integrations.anthropic_cache_control_hook import AnthropicCacheControlHook
+
+    AnthropicCacheControlHook.record_gateway_injection(arguments, added)

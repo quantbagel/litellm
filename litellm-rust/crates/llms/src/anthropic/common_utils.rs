@@ -6,8 +6,8 @@ use litellm_http::request::{
 };
 use litellm_llms_types::{
     formats::messages::{
-        ContentBlock, ContentBlockType, EffortLevel, Message, MessageContent, MessagesTool,
-        SystemPrompt,
+        ContentBlock, ContentBlockType, EffortLevel, Message, MessageContent, MessagesRequest,
+        MessagesTool, SystemPrompt,
     },
     providers::anthropic::{
         API_BASE, API_KEY_HEADER, AnthropicBeta, BETA_HEADER, BetaSet,
@@ -17,6 +17,97 @@ use litellm_llms_types::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+
+pub fn supports_anthropic_cache_control(
+    model: &str,
+    provider: &str,
+    supports_prompt_caching: bool,
+) -> bool {
+    supports_prompt_caching
+        && model.to_ascii_lowercase().contains("claude")
+        && matches!(provider, "anthropic" | "bedrock" | "vertex_ai" | "azure_ai")
+}
+
+pub fn is_claude_code_one_shot_subagent_request(
+    request: &MessagesRequest,
+    user_agent: Option<&str>,
+) -> bool {
+    let Some(user_agent) = user_agent else {
+        return false;
+    };
+    if (!user_agent.starts_with("claude-cli/") && !user_agent.starts_with("claude-code/"))
+        || request.messages.len() != 1
+        || request
+            .params
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+    {
+        return false;
+    }
+    let message = &request.messages[0];
+    if message.role != "user" {
+        return false;
+    }
+    let system = request
+        .params
+        .system
+        .as_ref()
+        .and_then(|system| serde_json::to_value(system).ok());
+    system.is_some_and(is_claude_code_subagent_billing_system)
+}
+
+fn is_claude_code_subagent_billing_system(system: Value) -> bool {
+    let texts: Option<Vec<&str>> = match &system {
+        Value::String(text) => Some(vec![text]),
+        Value::Array(blocks) => blocks
+            .iter()
+            .map(|block| {
+                let object = block.as_object()?;
+                (object.get("type")?.as_str()? == "text")
+                    .then(|| object.get("text")?.as_str())
+                    .flatten()
+            })
+            .collect(),
+        _ => None,
+    };
+    let Some(texts) = texts else {
+        return false;
+    };
+    let texts: Vec<&str> = texts
+        .into_iter()
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+    if texts.is_empty() {
+        return false;
+    }
+    let subagent_values: Vec<&str> = texts
+        .iter()
+        .filter_map(|text| claude_code_billing_fields(text))
+        .flatten()
+        .filter_map(|(key, value)| (key == "cc_is_subagent").then_some(value))
+        .collect();
+    subagent_values == ["true"]
+}
+
+fn claude_code_billing_fields(text: &str) -> Option<Vec<(&str, &str)>> {
+    let stripped = text.trim();
+    if stripped.contains(['\n', '\r']) {
+        return None;
+    }
+    let fields = stripped.strip_prefix("x-anthropic-billing-header:")?;
+    let parsed: Option<Vec<(&str, &str)>> = fields
+        .split(';')
+        .filter(|field| !field.trim().is_empty())
+        .map(|field| {
+            let (key, value) = field.split_once('=')?;
+            let key = key.trim();
+            let value = value.trim();
+            (!key.is_empty() && !value.is_empty()).then_some((key, value))
+        })
+        .collect();
+    parsed.filter(|parsed| !parsed.is_empty())
+}
 
 use crate::{
     anthropic::ANTHROPIC_OAUTH_TOKEN_PREFIX,
@@ -1885,6 +1976,7 @@ mod tests {
                 supports_sampling_params: true,
                 supports_speed: false,
                 supports_mid_conversation_system: false,
+                supports_prompt_caching: false,
                 effort_tiers: tiers(false, false, false, false, false, false),
             }
         );
@@ -1919,5 +2011,105 @@ mod tests {
             serde_json::from_value::<MessagesModelCapabilities>(input).unwrap(),
             expected
         );
+    }
+
+    #[rstest]
+    #[case::anthropic("claude-sonnet", "anthropic", true, true)]
+    #[case::bedrock("claude-sonnet", "bedrock", true, true)]
+    #[case::vertex("claude-sonnet", "vertex_ai", true, true)]
+    #[case::azure("claude-sonnet", "azure_ai", true, true)]
+    #[case::unsupported_provider("claude-sonnet", "deepseek", true, false)]
+    #[case::unsupported_model("gpt-test", "anthropic", true, false)]
+    #[case::unsupported_capability("claude-sonnet", "anthropic", false, false)]
+    fn cache_control_support_requires_model_provider_and_capability(
+        #[case] model: &str,
+        #[case] provider: &str,
+        #[case] capability: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            supports_anthropic_cache_control(model, provider, capability),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::claude_cli(
+        "claude-cli/1.0",
+        "x-anthropic-billing-header: cc_is_subagent=true",
+        None,
+        true
+    )]
+    #[case::claude_code(
+        "claude-code/1.0",
+        "x-anthropic-billing-header: cc_is_subagent=true",
+        None,
+        true
+    )]
+    #[case::user_agent_must_start_with_product(
+        "client claude-code/1.0",
+        "x-anthropic-billing-header: cc_is_subagent=true",
+        None,
+        false
+    )]
+    #[case::other_billing_field(
+        "claude-code/1.0",
+        "x-anthropic-billing-header: billing=true",
+        None,
+        false
+    )]
+    #[case::false_subagent_field(
+        "claude-code/1.0",
+        "x-anthropic-billing-header: cc_is_subagent=false",
+        None,
+        false
+    )]
+    #[case::nonempty_tools(
+        "claude-code/1.0",
+        "x-anthropic-billing-header: cc_is_subagent=true",
+        Some(json!([{"name": "lookup", "input_schema": {"type": "object"}}])),
+        false
+    )]
+    fn one_shot_subagent_requires_claude_code_request_shape(
+        #[case] user_agent: &str,
+        #[case] system: &str,
+        #[case] tools: Option<Value>,
+        #[case] expected: bool,
+    ) {
+        let mut request_value = json!({
+            "model": "claude-test",
+            "max_tokens": 16,
+            "system": system,
+            "messages": [{"role": "user", "content": "prompt"}]
+        });
+        if let Some(tools) = tools {
+            request_value["tools"] = tools;
+        }
+        let request: MessagesRequest = serde_json::from_value(request_value).unwrap();
+
+        assert_eq!(
+            is_claude_code_one_shot_subagent_request(&request, Some(user_agent)),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::empty_text_blocks_are_ignored(json!([
+        {"type": "text", "text": ""},
+        {"type": "text", "text": "x-anthropic-billing-header: cc_is_subagent=true"}
+    ]))]
+    fn one_shot_subagent_ignores_empty_system_text_blocks(#[case] system: Value) {
+        let request: MessagesRequest = serde_json::from_value(json!({
+            "model": "claude-test",
+            "max_tokens": 16,
+            "system": system,
+            "messages": [{"role": "user", "content": "prompt"}]
+        }))
+        .unwrap();
+
+        assert!(is_claude_code_one_shot_subagent_request(
+            &request,
+            Some("claude-cli/1.0")
+        ));
     }
 }

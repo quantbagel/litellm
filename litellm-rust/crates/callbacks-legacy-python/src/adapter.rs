@@ -44,6 +44,8 @@ struct LoggedRequest {
     context: RequestContext,
 }
 
+const MESSAGES_HOST_MODULE: &str = "litellm.rust_bridge.host.routes.messages";
+
 pub struct LegacyLogging {
     operation: LoggingOperation,
     call: PublicCall,
@@ -374,6 +376,12 @@ impl LegacyLogging {
         wire: Box<WireRequest>,
         context: &RequestContext,
     ) -> PyResult<HookStep<Self, Box<WireRequest>>> {
+        if context.gateway_injected_cache_blocks > 0 {
+            let kwargs = self.call.kwargs().bind(py);
+            py.import(MESSAGES_HOST_MODULE)?
+                .getattr("record_gateway_injection")?
+                .call1((kwargs, context.gateway_injected_cache_blocks))?;
+        }
         let logger = self.logger()?;
         logger.update_from_kwargs(py, self.call.kwargs(), &wire, context)?;
         let body = to_py(py, &wire.body)?
@@ -722,7 +730,7 @@ if asynchronous:
         });
     }
 
-    #[rstest::rstest]
+    #[rstest]
     fn kwargs_returned_by_the_pre_call_hook_are_what_the_call_prepares() {
         Python::initialize();
         Python::attach(|py| {
@@ -1100,9 +1108,33 @@ assert logger.update['custom_llm_provider'] == 'edenai', logger.update
         body: Value,
         secret_fields: &[&str],
     ) -> WireRequest {
+        before_send_with_gateway_injection(
+            bindings,
+            script,
+            optional_params,
+            body,
+            secret_fields,
+            0,
+        )
+    }
+
+    fn before_send_with_gateway_injection(
+        bindings: &[(&str, &Value)],
+        script: &CStr,
+        optional_params: Value,
+        body: Value,
+        secret_fields: &[&str],
+        gateway_injected_cache_blocks: usize,
+    ) -> WireRequest {
         Python::initialize();
         Python::attach(|py| {
             let locals = namespace(py, PAYLOAD_LOGGER);
+            locals
+                .set_item(
+                    "gateway_injected_cache_blocks",
+                    gateway_injected_cache_blocks,
+                )
+                .unwrap();
             for &(name, value) in bindings {
                 locals.set_item(name, to_py(py, value).unwrap()).unwrap();
             }
@@ -1117,6 +1149,7 @@ assert logger.update['custom_llm_provider'] == 'edenai', logger.update
                 optional_params,
                 secret_fields: secret_fields.iter().map(|name| name.to_string()).collect(),
                 api_key: Some(SecretValue::new("route-key")),
+                gateway_injected_cache_blocks,
             };
             let wire = WireRequest {
                 url: "https://provider.invalid/ocr".into(),
@@ -1130,6 +1163,49 @@ assert logger.update['custom_llm_provider'] == 'edenai', logger.update
             };
             *wire
         })
+    }
+
+    #[rstest::rstest]
+    fn gateway_injection_metadata_is_stamped_before_pre_call() {
+        let script = c"
+import sys, types
+
+module_name = 'litellm.rust_bridge.host.routes.messages'
+previous_module = sys.modules.get(module_name)
+messages_host = types.ModuleType(module_name)
+recorded = []
+metadata = {'existing': 'retained'}
+model_info = {'id': 'selected-deployment'}
+kwargs = {'logger': logger, 'litellm_metadata': metadata, 'model_info': model_info}
+observed = []
+def record_gateway_injection(arguments, added):
+    recorded.append((arguments['litellm_metadata'] is metadata, arguments['model_info'] is model_info, added))
+    if added > 0:
+        metadata['litellm_gateway_injected_cache'] = arguments['model_info']['id']
+messages_host.record_gateway_injection = record_gateway_injection
+sys.modules[module_name] = messages_host
+def on_pre_call(args):
+    observed.append(metadata.get('litellm_gateway_injected_cache'))
+def check():
+    sys.modules.pop(module_name, None)
+    if previous_module is not None:
+        sys.modules[module_name] = previous_module
+    assert kwargs['litellm_metadata'] is metadata
+    assert metadata.get('existing') == 'retained'
+    expected_recorded = [] if gateway_injected_cache_blocks == 0 else [
+        (True, True, gateway_injected_cache_blocks)
+    ]
+    expected_stamp = None if gateway_injected_cache_blocks == 0 else 'selected-deployment'
+    assert recorded == expected_recorded, recorded
+    assert observed == [expected_stamp], observed
+";
+        let zero_injection =
+            before_send_with_gateway_injection(&[], script, json!({}), json!({}), &[], 0);
+        let native_injection =
+            before_send_with_gateway_injection(&[], script, json!({}), json!({}), &[], 2);
+
+        assert_eq!(zero_injection.body, json!({}));
+        assert_eq!(native_injection.body, json!({}));
     }
 
     /// `before_provider_request` over `wire`, then the provider's raw response the way the driver
@@ -1170,6 +1246,7 @@ assert logger.update['custom_llm_provider'] == 'edenai', logger.update
             optional_params: json!({}),
             secret_fields: vec![],
             api_key: Some(SecretValue::new("route-key")),
+            gateway_injected_cache_blocks: 0,
         }
     }
 
