@@ -218,7 +218,7 @@ def update_logging(
     )
 
 
-def record_gateway_injection(kwargs: dict[str, object], added: int) -> None:
+def record_gateway_injection(kwargs: Mapping[str, object], added: int) -> None:
     from litellm.integrations.anthropic_cache_control_hook import AnthropicCacheControlHook
 
     AnthropicCacheControlHook.record_gateway_injection(kwargs, added)
