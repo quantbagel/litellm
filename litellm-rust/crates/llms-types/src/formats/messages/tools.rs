@@ -568,6 +568,10 @@ mod tests {
     use crate::formats::messages::{
         AdvisorTool, AdvisorToolName, CacheControl, UrlSourceToolReference,
     };
+    use crate::{
+        formats::messages::{CacheControlTtl, CacheControlType},
+        recognized::Recognized,
+    };
     use serde_json::Map;
 
     use crate::formats::messages::AllowedCaller;
@@ -819,7 +823,7 @@ mod tests {
     #[case::text_editor_20250429(
         json!({"type":"text_editor_20250429","name":"str_replace_based_edit_tool","cache_control":{"type":"ephemeral","ttl":"1h"}}),
         BuiltinMessagesTool::TextEditor20250429(ClientTool {
-            cache_control: Some(cache_control("ephemeral", "1h")),
+            cache_control: Some(cache_control(CacheControlType::Ephemeral, CacheControlTtl::OneHour)),
             ..client_tool(StrReplaceBasedEditToolName::StrReplaceBasedEditTool)
         })
     )]
@@ -1045,7 +1049,7 @@ mod tests {
             model: String::from("claude-opus-5-5"),
             allowed_callers: None,
             cache_control: None,
-            caching: Some(cache_control("ephemeral", "5m")),
+            caching: Some(cache_control(CacheControlType::Ephemeral, CacheControlTtl::FiveMinutes)),
             defer_loading: None,
             max_tokens: Some(2048),
             max_uses: None,
@@ -1223,10 +1227,10 @@ mod tests {
         }
     }
 
-    fn cache_control(cache_type: &str, ttl: &str) -> CacheControl {
+    fn cache_control(cache_type: CacheControlType, ttl: CacheControlTtl) -> CacheControl {
         CacheControl {
-            cache_type: Some(String::from(cache_type)),
-            ttl: Some(String::from(ttl)),
+            cache_type: Some(Recognized::Known(cache_type)),
+            ttl: Some(Recognized::Known(ttl)),
             ..CacheControl::default()
         }
     }

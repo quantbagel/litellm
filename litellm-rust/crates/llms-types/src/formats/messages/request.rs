@@ -114,13 +114,29 @@ impl ContentBlock {
 #[derive(Default)]
 pub struct CacheControl {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub cache_type: Option<String>,
+    pub cache_type: Option<Recognized<CacheControlType>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
+    pub ttl: Option<Recognized<CacheControlTtl>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+#[macro_rules_attribute::apply(crate::wire_type)]
+#[derive(Copy, Eq, strum::VariantArray)]
+pub enum CacheControlType {
+    #[serde(rename = "ephemeral")]
+    Ephemeral,
+}
+
+#[macro_rules_attribute::apply(crate::wire_type)]
+#[derive(Copy, Eq, strum::VariantArray)]
+pub enum CacheControlTtl {
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
 }
 
 #[macro_rules_attribute::apply(crate::wire_type)]
@@ -398,6 +414,42 @@ mod tests {
     use crate::recognized::Recognized;
 
     use serde_json::{Map, Value};
+
+    #[rstest]
+    #[case::known(
+        json!({"type": "ephemeral", "ttl": "1h"}),
+        Some(Recognized::Known(CacheControlType::Ephemeral)),
+        Some(Recognized::Known(CacheControlTtl::OneHour))
+    )]
+    #[case::five_minutes(
+        json!({"type": "ephemeral", "ttl": "5m"}),
+        Some(Recognized::Known(CacheControlType::Ephemeral)),
+        Some(Recognized::Known(CacheControlTtl::FiveMinutes))
+    )]
+    #[case::unknown_values_pass_through(
+        json!({"type": "persistent", "ttl": 300}),
+        Some(Recognized::Unrecognized(json!("persistent"))),
+        Some(Recognized::Unrecognized(json!(300)))
+    )]
+    #[case::variant_name_is_not_a_wire_value(
+        json!({"ttl": "FiveMinutes"}),
+        None,
+        Some(Recognized::Unrecognized(json!("FiveMinutes")))
+    )]
+    #[case::absent(json!({}), None, None)]
+    fn cache_control_types_known_values_and_keeps_unknown_ones(
+        #[case] input: Value,
+        #[case] cache_type: Option<Recognized<CacheControlType>>,
+        #[case] ttl: Option<Recognized<CacheControlTtl>>,
+    ) {
+        let control: CacheControl = serde_json::from_value(input.clone()).unwrap();
+
+        assert_eq!(
+            (control.cache_type.clone(), control.ttl.clone()),
+            (cache_type, ttl)
+        );
+        assert_eq!(serde_json::to_value(control).unwrap(), input);
+    }
 
     fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(value: &Value) -> Value {
         let parsed: T = serde_json::from_value(value.clone()).unwrap();

@@ -4,9 +4,9 @@ use bytes::Bytes;
 use litellm_host::call::CallOutput;
 use litellm_llms::{ErrorDetail, base_llm::messages::context::MessagesModelCapabilities};
 use litellm_llms_types::{
-    formats::messages::{MessagesRequest, MessagesResponse},
+    formats::messages::{CacheControlTtl, MessagesRequest, MessagesResponse},
     headers::ProviderSpecificHeaders,
-    integrations::{CacheControlInjectionPoint, PromptCachingTtl},
+    integrations::CacheControlInjectionPoint,
 };
 use litellm_router_types::LitellmParams;
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ pub struct MessagesSettings {
     #[serde(default)]
     pub enable_prompt_caching: bool,
     #[serde(default)]
-    pub prompt_caching_ttl: Option<PromptCachingTtl>,
+    pub prompt_caching_ttl: Option<CacheControlTtl>,
     #[serde(default)]
     pub user_agent: Option<String>,
 }
@@ -207,11 +207,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::five_minutes("5m", PromptCachingTtl::FiveMinutes)]
-    #[case::one_hour("1h", PromptCachingTtl::OneHour)]
+    #[case::five_minutes("5m", CacheControlTtl::FiveMinutes)]
+    #[case::one_hour("1h", CacheControlTtl::OneHour)]
     fn cache_control_settings_are_projected(
         #[case] ttl: &str,
-        #[case] expected_ttl: PromptCachingTtl,
+        #[case] expected_ttl: CacheControlTtl,
     ) {
         let point = json!({"location": "message", "index": -1, "control": {"type": "ephemeral"}});
         let projected = json!({

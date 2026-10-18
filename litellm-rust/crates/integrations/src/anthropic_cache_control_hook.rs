@@ -2,13 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use litellm_llms_types::{
     formats::messages::{
-        CacheControl, ContentBlock, ContentBlockType, Message, MessageContent,
-        MessagesOptionalParams, MessagesRequest, MessagesTool, SystemPrompt,
+        CacheControl, CacheControlTtl, CacheControlType, ContentBlock, ContentBlockType, Message,
+        MessageContent, MessagesOptionalParams, MessagesRequest, MessagesTool, SystemPrompt,
     },
-    integrations::{
-        CacheControlInjectionPoint, CacheControlMessageInjectionPoint, PromptCachingTtl, Role,
-        Target,
-    },
+    integrations::{CacheControlInjectionPoint, CacheControlMessageInjectionPoint, Target},
     providers::anthropic::BILLING_HEADER_PREFIX,
     recognized::Recognized,
 };
@@ -23,7 +20,7 @@ pub struct InjectionInputs<'a> {
     pub enable_prompt_caching: bool,
     pub supports_anthropic_cache_control: bool,
     pub one_shot_subagent: bool,
-    pub ttl: Option<PromptCachingTtl>,
+    pub ttl: Option<CacheControlTtl>,
 }
 
 pub struct Injected {
@@ -56,7 +53,7 @@ fn get_default_injection_points(
     let control = default_control(inputs.ttl);
     vec![
         CacheControlInjectionPoint::Message(CacheControlMessageInjectionPoint {
-            target: Target::Role(Role(SYSTEM_ROLE.into())),
+            target: Target::Role(SYSTEM_ROLE.into()),
             control: Some(control.clone()),
         }),
         CacheControlInjectionPoint::Message(CacheControlMessageInjectionPoint {
@@ -66,10 +63,9 @@ fn get_default_injection_points(
     ]
 }
 
-fn default_control(ttl: Option<PromptCachingTtl>) -> CacheControl {
+fn default_control(ttl: Option<CacheControlTtl>) -> CacheControl {
     CacheControl {
-        cache_type: Some("ephemeral".into()),
-        ttl: ttl.map(|ttl| <&'static str>::from(ttl).into()),
+        ttl: ttl.map(Recognized::Known),
         ..CacheControl::default()
     }
 }
@@ -139,7 +135,7 @@ fn message_point(point: &CacheControlInjectionPoint) -> Option<&CacheControlMess
 }
 
 fn is_system_point(point: &CacheControlMessageInjectionPoint) -> bool {
-    matches!(&point.target, Target::Role(role) if role.0 == SYSTEM_ROLE)
+    matches!(&point.target, Target::Role(role) if role == SYSTEM_ROLE)
 }
 
 fn blocks_reserved_outside_messages(injection_points: &[CacheControlInjectionPoint]) -> usize {
@@ -220,7 +216,7 @@ fn resolve_target_indices(
                 .into_iter()
                 .collect()
         }
-        Target::Role(role) => roles.get(&role.0).cloned().unwrap_or_default(),
+        Target::Role(role) => roles.get(role).cloned().unwrap_or_default(),
     }
 }
 
@@ -287,12 +283,11 @@ fn injected_control(control: Option<&CacheControl>) -> CacheControl {
         cache_type: Some(
             control
                 .and_then(|control| control.cache_type.clone())
-                .unwrap_or_else(|| "ephemeral".into()),
+                .unwrap_or(Recognized::Known(CacheControlType::Ephemeral)),
         ),
         ttl: control
-            .and_then(|control| control.ttl.as_deref())
-            .and_then(|ttl| ttl.parse::<PromptCachingTtl>().ok())
-            .map(|ttl| <&'static str>::from(ttl).into()),
+            .and_then(|control| control.ttl.clone())
+            .filter(|ttl| ttl.known().is_some()),
         scope: control.and_then(|control| control.scope.clone()),
         extra: control
             .map(|control| control.extra.clone())
@@ -396,7 +391,7 @@ mod tests {
         }
     }
 
-    fn defaults(ttl: Option<PromptCachingTtl>) -> InjectionInputs<'static> {
+    fn defaults(ttl: Option<CacheControlTtl>) -> InjectionInputs<'static> {
         InjectionInputs {
             points: &[],
             enable_prompt_caching: true,
@@ -537,11 +532,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::five_minutes(PromptCachingTtl::FiveMinutes, "5m")]
-    #[case::one_hour(PromptCachingTtl::OneHour, "1h")]
+    #[case::five_minutes(CacheControlTtl::FiveMinutes, "5m")]
+    #[case::one_hour(CacheControlTtl::OneHour, "1h")]
     fn defaults_apply_ttl(
         simple_request: MessagesRequest,
-        #[case] ttl: PromptCachingTtl,
+        #[case] ttl: CacheControlTtl,
         #[case] expected: &str,
     ) {
         let (value, _) = inject(simple_request, &defaults(Some(ttl)));
@@ -623,6 +618,52 @@ mod tests {
         let request_value = json!({
             "model": "claude-test", "max_tokens": 32,
             "messages": [{"role": "user", "content": content}]
+        });
+
+        let (value, added) = inject(request(request_value.clone()), &configured(&points));
+
+        assert_eq!(added, 0);
+        assert_eq!(value, request_value);
+    }
+
+    #[rstest]
+    #[case::client_marks_fill_the_cap(
+        json!("system prompt"),
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": [{"type": "text", "text": "b", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": [{"type": "text", "text": "c", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": [{"type": "text", "text": "d", "cache_control": {"type": "ephemeral"}}]}
+        ])
+    )]
+    #[case::system_already_marked_on_an_earlier_block(
+        json!([
+            {"type": "text", "text": "client marked", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            {"type": "text", "text": "unmarked tail"}
+        ]),
+        json!([{"role": "user", "content": [{"type": "text", "text": "prompt"}]}])
+    )]
+    fn system_point_adds_nothing(#[case] system: Value, #[case] messages: Value) {
+        let points = configured_points(json!([{"location": "message", "role": "system"}]));
+        let request_value = json!({
+            "model": "claude-test", "max_tokens": 32, "system": system, "messages": messages
+        });
+
+        let (value, added) = inject(request(request_value.clone()), &configured(&points));
+
+        assert_eq!(added, 0);
+        assert_eq!(value, request_value);
+    }
+
+    #[rstest]
+    #[case::one_past_the_end(1)]
+    #[case::far_past_the_end(99)]
+    #[case::negative_past_the_start(-2)]
+    fn out_of_range_index_marks_nothing(#[case] index: i64) {
+        let points = configured_points(json!([{"location": "message", "index": index}]));
+        let request_value = json!({
+            "model": "claude-test", "max_tokens": 32,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "only"}]}]
         });
 
         let (value, added) = inject(request(request_value.clone()), &configured(&points));

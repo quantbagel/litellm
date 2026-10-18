@@ -1,5 +1,3 @@
-use std::fmt;
-
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -8,55 +6,8 @@ use crate::formats::messages::CacheControl;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Index(i64),
-    Role(Role),
+    Role(String),
     None,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Role(pub String);
-
-impl Serialize for Role {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Role {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer).map(Self)
-    }
-}
-
-impl fmt::Display for Role {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    strum::Display,
-    strum::EnumString,
-    strum::IntoStaticStr,
-    strum::VariantArray,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-pub enum PromptCachingTtl {
-    #[strum(serialize = "5m")]
-    FiveMinutes,
-    #[strum(serialize = "1h")]
-    OneHour,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,7 +76,7 @@ impl Serialize for CacheControlInjectionPoint {
                         object.insert("index".into(), Value::Number((*index).into()));
                     }
                     Target::Role(role) => {
-                        object.insert("role".into(), Value::String(role.0.clone()));
+                        object.insert("role".into(), Value::String(role.clone()));
                     }
                     Target::None => {}
                 }
@@ -167,7 +118,7 @@ fn role_target(object: &Map<String, Value>) -> Target {
     object
         .get("role")
         .and_then(Value::as_str)
-        .map(|role| Target::Role(Role(role.to_string())))
+        .map(|role| Target::Role(role.to_string()))
         .unwrap_or(Target::None)
 }
 
@@ -176,18 +127,15 @@ mod tests {
     use rstest::rstest;
     use serde_json::{Value, json};
 
-    use super::{
-        CacheControlInjectionPoint, CacheControlMessageInjectionPoint, PromptCachingTtl, Role,
-        Target,
-    };
+    use super::{CacheControlInjectionPoint, CacheControlMessageInjectionPoint, Target};
 
     #[rstest]
     #[case::negative_index_string(json!({"location": "message", "index": "-1"}), Target::Index(-1))]
     #[case::out_of_range_index(json!({"location": "message", "index": 99}), Target::Index(99))]
-    #[case::role_only(json!({"location": "message", "role": "user"}), Target::Role(Role("user".into())))]
+    #[case::role_only(json!({"location": "message", "role": "user"}), Target::Role("user".into()))]
     #[case::invalid_index_falls_back_to_role(
         json!({"location": "message", "index": "latest", "role": "assistant"}),
-        Target::Role(Role("assistant".into()))
+        Target::Role("assistant".into())
     )]
     #[case::index_precedes_system_role(
         json!({"location": "message", "index": 0, "role": "system"}),
@@ -250,32 +198,5 @@ mod tests {
 
         assert!(matches!(&point, CacheControlInjectionPoint::Unknown(_)));
         assert_eq!(serde_json::to_value(point).unwrap(), input);
-    }
-
-    #[rstest]
-    #[case::five_minutes("5m", Some(PromptCachingTtl::FiveMinutes))]
-    #[case::one_hour("1h", Some(PromptCachingTtl::OneHour))]
-    #[case::invalid("five_minutes", None)]
-    #[case::variant_name("FiveMinutes", None)]
-    fn ttl_accepts_only_public_values(
-        #[case] input: &str,
-        #[case] expected: Option<PromptCachingTtl>,
-    ) {
-        assert_eq!(input.parse::<PromptCachingTtl>().ok(), expected);
-    }
-
-    #[rstest]
-    #[case::five_minutes(PromptCachingTtl::FiveMinutes, "5m")]
-    #[case::one_hour(PromptCachingTtl::OneHour, "1h")]
-    fn ttl_serializes_to_its_public_value(#[case] input: PromptCachingTtl, #[case] expected: &str) {
-        assert_eq!(serde_json::to_value(input).unwrap(), json!(expected));
-        assert_eq!(<&'static str>::from(input), expected);
-    }
-
-    #[rstest]
-    #[case::number(json!(5))]
-    #[case::null(Value::Null)]
-    fn ttl_rejects_non_string_json(#[case] value: Value) {
-        assert!(serde_json::from_value::<PromptCachingTtl>(value).is_err());
     }
 }
