@@ -2,6 +2,7 @@ import asyncio
 from typing import Final
 
 import pytest
+from pydantic import TypeAdapter
 
 import litellm
 from litellm.caching.caching import Cache, CacheMode
@@ -11,10 +12,35 @@ from litellm.caching.caching_handler import (
 from litellm.caching.dual_cache import DualCache
 from litellm.caching.in_memory_cache import InMemoryCache
 from litellm.constants import RESPONSE_CACHE_EXCLUDED_PROVIDERS
-from litellm.rust_bridge.host.cache import CacheAccess, access, alookup, astore, lookup, store
+from litellm.llms.anthropic.pass_through.messages.response_cache import get_cached_stream_events
+from litellm.rust_bridge.host.cache import (
+    MESSAGES_ENTRY,
+    RESPONSE_ENTRY,
+    CacheAccess,
+    EntryFormat,
+    ResponseOutput,
+    StreamOutput,
+    access,
+    alookup,
+    astore,
+    lookup,
+    store,
+)
 from litellm.types.caching import CachingSupportedCallTypes, LiteLLMCacheType
 
 REQUEST: Final[dict[str, object]] = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+_ENTRY: Final = TypeAdapter(dict[str, object])
+STREAM_REQUEST: Final[dict[str, object]] = {**REQUEST, "stream": True}
+MESSAGES_EVENTS: Final = (
+    'event: message_start\ndata: {"type":"message_start"}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+)
+
+
+def response_output(value: object) -> ResponseOutput:
+    return ResponseOutput(kind="Response", value=value)
 
 
 def configure(monkeypatch: pytest.MonkeyPatch, cache: Cache) -> Cache:
@@ -22,13 +48,15 @@ def configure(monkeypatch: pytest.MonkeyPatch, cache: Cache) -> Cache:
     return cache
 
 
-def _cache_access(cache: Cache, memory_tier: DualCache | None = None, tiered_writes: bool = True) -> CacheAccess:
+def _cache_access(
+    cache: Cache, memory_tier: DualCache | None = None, entry_format: EntryFormat = RESPONSE_ENTRY
+) -> CacheAccess:
     return CacheAccess(
         cache=cache,
         read=True,
         write=True,
         memory_tier=memory_tier,
-        tiered_writes=tiered_writes,
+        format=entry_format,
     )
 
 
@@ -107,7 +135,7 @@ def test_only_a_redis_cache_gets_a_worker_memory_tier(
 
     assert local is not None and local.memory_tier is None
     assert redis is not None and isinstance(redis.memory_tier, DualCache)
-    assert redis.tiered_writes is tiered
+    assert redis.format.tiered_writes is tiered
 
 
 @pytest.mark.parametrize("cache_key", (None, "preset-key"), ids=("generated-key", "preset-key"))
@@ -118,11 +146,11 @@ def test_lookup_returns_cached_response_and_key(cache_key: str | None) -> None:
     request: Final = REQUEST if cache_key is None else {**REQUEST, "cache_key": cache_key}
     expected_key: Final = cache.get_cache_key(**REQUEST) if cache_key is None else cache_key
 
-    store(cache_access, response, request)
+    store(cache_access, response_output(response), request)
     hit: Final = lookup(cache_access, request)
 
     assert hit is not None
-    assert hit.response == response
+    assert hit.response == response_output(response)
     assert hit.key == expected_key
 
 
@@ -131,7 +159,7 @@ def test_lookup_skips_responses_without_output() -> None:
     cache_access: Final = _cache_access(cache)
     response: Final = {"choices": []}
 
-    store(cache_access, response, REQUEST)
+    store(cache_access, response_output(response), REQUEST)
     assert lookup(cache_access, REQUEST) is None
 
     cache.add_cache(response, **REQUEST)
@@ -151,7 +179,7 @@ async def test_async_lookup_uses_memory_tier_and_discards_empty_responses() -> N
     hit: Final = await alookup(cache_access, REQUEST)
 
     assert hit is not None
-    assert hit.response == response
+    assert hit.response == response_output(response)
     assert hit.key == cache.get_cache_key(**REQUEST)
 
     empty_key: Final = "empty-response"
@@ -169,18 +197,18 @@ async def test_async_store_routes_writes_and_skips_responses_without_output() ->
     cache_access: Final = _cache_access(cache, memory_tier)
     response: Final = {"id": "cached"}
 
-    await astore(cache_access, response, REQUEST)
+    await astore(cache_access, response_output(response), REQUEST)
     pending_writes: Final = tuple(_PENDING_CACHE_WRITES)
     await asyncio.gather(*pending_writes)
     hit: Final = await alookup(cache_access, REQUEST)
 
     assert hit is not None
-    assert hit.response == response
+    assert hit.response == response_output(response)
     assert hit.key == cache.get_cache_key(**REQUEST)
 
     empty_key: Final = "empty-response"
     empty_request: Final = {**REQUEST, "cache_key": empty_key}
-    await astore(cache_access, {"choices": []}, empty_request)
+    await astore(cache_access, response_output({"choices": []}), empty_request)
 
     assert await alookup(cache_access, empty_request) is None
     assert await memory_tier.in_memory_cache.async_get_cache(empty_key) is None
@@ -190,12 +218,52 @@ async def test_async_store_routes_writes_and_skips_responses_without_output() ->
 async def test_async_store_omits_the_memory_tier_when_tiered_writes_are_disabled() -> None:
     cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
     memory_tier: Final = DualCache(in_memory_cache=InMemoryCache())
-    cache_access: Final = _cache_access(cache, memory_tier, tiered_writes=False)
+    cache_access: Final = _cache_access(cache, memory_tier, MESSAGES_ENTRY)
     response: Final = {"id": "cached"}
 
-    await astore(cache_access, response, REQUEST)
+    await astore(cache_access, response_output(response), REQUEST)
     pending_writes: Final = tuple(_PENDING_CACHE_WRITES)
     await asyncio.gather(*pending_writes)
 
     assert await cache.async_get_cache(**REQUEST) == response
     assert await memory_tier.async_get_cache(cache.get_cache_key(**REQUEST)) is None
+
+
+def stored_entry(cache: Cache, request: dict[str, object]) -> object:
+    raw: Final = EntryFormat(
+        entry=RESPONSE_ENTRY.entry,
+        output=lambda entry, _: ResponseOutput(kind="Response", value=entry),
+        tiered_writes=True,
+    )
+    hit: Final = lookup(_cache_access(cache, entry_format=raw), request)
+    return None if hit is None else hit.response["value"]
+
+
+def test_a_messages_stream_is_stored_as_the_legacy_event_list_and_replayed() -> None:
+    cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
+    cache_access: Final = _cache_access(cache, entry_format=MESSAGES_ENTRY)
+    stream: Final = StreamOutput(kind="Stream", value="".join(MESSAGES_EVENTS))
+
+    store(cache_access, stream, STREAM_REQUEST)
+    hit: Final = lookup(cache_access, STREAM_REQUEST)
+
+    assert get_cached_stream_events(_ENTRY.validate_python(stored_entry(cache, STREAM_REQUEST))) == MESSAGES_EVENTS
+    assert hit is not None
+    assert hit.response == stream
+
+
+def test_a_stream_on_a_route_without_a_stream_entry_is_not_stored() -> None:
+    cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
+
+    store(_cache_access(cache), StreamOutput(kind="Stream", value="".join(MESSAGES_EVENTS)), STREAM_REQUEST)
+
+    assert stored_entry(cache, STREAM_REQUEST) is None
+
+
+@pytest.mark.parametrize(("request_kwargs", "hit"), ((REQUEST, True), (STREAM_REQUEST, False)), ids=("unary", "stream"))
+def test_a_stored_response_answers_only_a_unary_request(request_kwargs: dict[str, object], hit: bool) -> None:
+    cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
+    response: Final = {"id": "cached"}
+    cache.add_cache(response, **request_kwargs)
+
+    assert (lookup(_cache_access(cache), request_kwargs) is not None) is hit

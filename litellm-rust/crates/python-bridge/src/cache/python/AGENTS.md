@@ -4,7 +4,7 @@ This directory lets Rust inference use the configured Python cache. `service.rs`
 
 Every call into Python goes through that host module. Do not read `litellm.cache`, call cache methods directly, or re-derive which calls may read or write. Core remains independent of Python objects and cache implementation details
 
-Preparing the Python adapter must not invoke the lazy native identity builder or create a native cache request or key. Keep the host's hit key unchanged. Python owns key construction, lookup and storage; Rust transports operations and converts responses
+Preparing the Python adapter must not invoke the lazy native identity builder or create a native cache request or key. Keep the host's hit key unchanged. Python owns key construction, lookup, storage and the stored entry format. Rust sends and receives a route-neutral `CachedOutput` (`Response` or `Stream`), and `litellm.rust_bridge.host.cache` maps it to the entry the legacy Python route stores for that call type, so the two replay each other's entries. Never name a route's entry shape in Rust
 
 Await asynchronous cache lookups through the existing host driver in the caller's task. Do not create another asyncio task or event loop for them. Asynchronous stores are handed to Python's `create_cache_write_task`, so the response returns before the write lands, as on the Python route. Cancellation during a lookup must prevent the provider request and the cache write. A failure to reach Python is a cache failure, never a request failure. Preserve ordinary cache failure handling without swallowing cancellation or other Python base exceptions
 

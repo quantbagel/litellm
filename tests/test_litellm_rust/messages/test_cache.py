@@ -22,7 +22,7 @@ from tests.test_litellm_rust.support.caching import (
 from tests.test_litellm_rust.support.callback_recorder import RecordingLogger, drain_logging, request_body
 from tests.test_litellm_rust.support.recording_server import RecordingServer, ResponseSpec
 from tests.test_litellm_rust.support.results import cache_key, stored_cache_key
-from tests.test_litellm_rust.support.routing import assert_served_natively
+from tests.test_litellm_rust.support.routing import assert_served_natively, routed
 
 pytestmark = pytest.mark.requires_rust_extension
 
@@ -73,6 +73,26 @@ async def test_a_completed_native_stream_is_replayed_from_the_python_cache(call:
     assert first == b"".join(STREAM.payloads())
     assert second == first
     assert_served_natively(server, count=1)
+
+
+@pytest.mark.parametrize("native_writes", (True, False), ids=("native-writes", "python-writes"))
+@pytest.mark.usefixtures("cache")
+async def test_native_and_python_replay_each_others_stream_entries(
+    call: Call, server: RecordingServer, native_writes: bool
+) -> None:
+    server.serve(STREAM)
+
+    async def stream(native: bool) -> bytes:
+        if native:
+            return await collect(await call(stream=True))
+        with routed():
+            return await collect(await call(stream=True))
+
+    first: Final = await stream(native_writes)
+    second: Final = await stream(not native_writes)
+
+    assert len(server.requests) == 1
+    assert second == first == b"".join(STREAM.payloads())
 
 
 @pytest.mark.usefixtures("cache")

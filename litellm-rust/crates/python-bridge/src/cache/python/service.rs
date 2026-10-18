@@ -12,8 +12,6 @@ use litellm_host::{
 use litellm_inference::caching::{Cachable, CachedOutput};
 use serde_json::Value;
 
-const STREAM_EVENTS_KEY: &str = "litellm_cached_anthropic_sse_events";
-
 pub(crate) struct Cached<P>(PhantomData<P>);
 
 impl<P: Protocol> Protocol for Cached<P> {
@@ -51,26 +49,16 @@ pub(crate) fn scoped<P: Cachable>(services: HostServices<Cached<P>>) -> ScopedCa
 }
 
 fn from_python<P: Cachable>(value: Value) -> Result<Value, Error> {
-    let output = match value.get(STREAM_EVENTS_KEY) {
-        Some(events) => {
-            let events: Vec<String> =
-                serde_json::from_value(events.clone()).map_err(|_| Error::InvalidEntry)?;
-            CachedOutput::Stream(events.concat())
-        }
-        None => CachedOutput::Response(value),
-    };
+    let output: CachedOutput<Value> =
+        serde_json::from_value(value).map_err(|_| Error::InvalidEntry)?;
     serde_json::to_value(ResponseEnvelope::new(P::SURFACE, output)).map_err(|_| Error::InvalidEntry)
 }
 
 fn to_python<P: Cachable>(value: Value) -> Result<Value, Error> {
     let envelope: ResponseEnvelope<CachedOutput<Value>> =
         serde_json::from_value(value).map_err(|_| Error::InvalidEntry)?;
-    match envelope.decode(P::SURFACE).ok_or(Error::InvalidEntry)? {
-        CachedOutput::Response(response) => Ok(response),
-        CachedOutput::Stream(text) => Ok(serde_json::json!({
-            STREAM_EVENTS_KEY: text.split_inclusive("\n\n").collect::<Vec<_>>()
-        })),
-    }
+    let output = envelope.decode(P::SURFACE).ok_or(Error::InvalidEntry)?;
+    serde_json::to_value(output).map_err(|_| Error::InvalidEntry)
 }
 
 impl<P: Cachable> ResponseCacheService for PythonCacheService<P> {
@@ -185,7 +173,7 @@ mod tests {
             panic!("expected Python lookup");
         };
         reply.send(Ok(hit.then(|| CacheHit {
-            value: json!({"source": "cache"}),
+            value: json!({"kind": "Response", "value": {"source": "cache"}}),
             key: "python-owned-key".into(),
         })));
         if !hit {
@@ -194,7 +182,10 @@ mod tests {
             else {
                 panic!("expected Python store on a miss");
             };
-            assert_eq!(value, json!({"source": "provider"}));
+            assert_eq!(
+                value,
+                json!({"kind": "Response", "value": {"source": "provider"}})
+            );
             reply.send(Ok(()));
         }
         let MachineStep::Complete(response) = machine.resume().await.unwrap() else {
@@ -225,7 +216,7 @@ mod tests {
             panic!("expected Python lookup");
         };
         reply.send(Ok(Some(CacheHit {
-            value: json!({"answer": 42}),
+            value: json!({"kind": "Response", "value": {"answer": 42}}),
             key: "python-owned-key".into(),
         })));
         let MachineStep::Complete(hit) = machine.resume().await.unwrap() else {
@@ -233,7 +224,7 @@ mod tests {
         };
         assert_eq!(hit.key, "python-owned-key");
         assert_eq!(
-            from_python::<TestRoute>(json!({"answer": 42})).unwrap(),
+            from_python::<TestRoute>(json!({"kind": "Response", "value": {"answer": 42}})).unwrap(),
             hit.value
         );
     }
