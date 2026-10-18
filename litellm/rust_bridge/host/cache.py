@@ -3,28 +3,31 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Final, Literal, TypeAlias
 
-from pydantic import TypeAdapter
-from typing_extensions import ReadOnly, TypedDict
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+from litellm.types.utils import CallTypes
 
 if TYPE_CHECKING:
     from litellm.caching.caching import Cache
     from litellm.caching.dual_cache import DualCache
 
 
-class ResponseOutput(TypedDict):
-    kind: ReadOnly[Literal["Response"]]
-    value: ReadOnly[object]
+class ResponseOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    kind: Literal["Response"] = "Response"
+    value: object
 
 
-class StreamOutput(TypedDict):
-    kind: ReadOnly[Literal["Stream"]]
-    value: ReadOnly[str]
+class StreamOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    kind: Literal["Stream"] = "Stream"
+    value: str
 
 
 CachedOutput: TypeAlias = ResponseOutput | StreamOutput
-_OUTPUT: Final = TypeAdapter[CachedOutput](CachedOutput)
+_OUTPUT: Final = TypeAdapter[CachedOutput](Annotated[CachedOutput, Field(discriminator="kind")])
 _ENTRY: Final = TypeAdapter(dict[str, object])
 _EVENTS: Final = TypeAdapter(list[str])
 _SSE_EVENT_BOUNDARY: Final = re.compile(r"(?<=\n\n)")
@@ -38,19 +41,25 @@ class EntryFormat:
 
 
 def _response_entry(output: CachedOutput) -> object | None:
-    return output["value"] if output["kind"] == "Response" else None
+    match output:
+        case ResponseOutput(value=response):
+            return response
+        case StreamOutput():
+            return None
 
 
 def _response_output(entry: object, stream: bool) -> CachedOutput | None:
-    return None if stream else ResponseOutput(kind="Response", value=entry)
+    return None if stream else ResponseOutput(value=entry)
 
 
 def _messages_entry(output: CachedOutput) -> object:
     from litellm.types.caching import CACHED_STREAM_EVENTS_KEY
 
-    if output["kind"] == "Response":
-        return output["value"]
-    return {CACHED_STREAM_EVENTS_KEY: [event for event in _SSE_EVENT_BOUNDARY.split(output["value"]) if event]}
+    match output:
+        case ResponseOutput(value=response):
+            return response
+        case StreamOutput(value=text):
+            return {CACHED_STREAM_EVENTS_KEY: [event for event in _SSE_EVENT_BOUNDARY.split(text) if event]}
 
 
 def _stream_events(entry: object) -> list[str] | None:
@@ -65,17 +74,17 @@ def _stream_events(entry: object) -> list[str] | None:
 def _messages_output(entry: object, stream: bool) -> CachedOutput:
     events: Final = _stream_events(entry)
     if events is None:
-        return ResponseOutput(kind="Response", value=entry)
-    return StreamOutput(kind="Stream", value="".join(events))
+        return ResponseOutput(value=entry)
+    return StreamOutput(value="".join(events))
 
 
 RESPONSE_ENTRY: Final = EntryFormat(entry=_response_entry, output=_response_output, tiered_writes=True)
 MESSAGES_ENTRY: Final = EntryFormat(entry=_messages_entry, output=_messages_output, tiered_writes=False)
 
 
-def entry_format(call_type: str) -> EntryFormat:
+def entry_format(call_type: CallTypes) -> EntryFormat:
     match call_type:
-        case "anthropic_messages":
+        case CallTypes.anthropic_messages:
             return MESSAGES_ENTRY
         case _:
             return RESPONSE_ENTRY
@@ -106,13 +115,13 @@ def access(kwargs: Mapping[str, object], call_type: str) -> CacheAccess | None:
         read=read,
         write=write,
         memory_tier=response_memory_tier(cache),
-        format=entry_format(call_type),
+        format=entry_format(CallTypes(call_type)),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class CacheHit:
-    response: CachedOutput
+    response: Mapping[str, object]
     key: str
 
 
@@ -124,7 +133,7 @@ def _request(cache: Cache, kwargs: Mapping[str, object]) -> tuple[str, Mapping[s
 
 def _hit(access: CacheAccess, entry: object, key: str, kwargs: Mapping[str, object]) -> CacheHit | None:
     output: Final = access.format.output(entry, kwargs.get("stream") is True)
-    return None if output is None else CacheHit(response=output, key=key)
+    return None if output is None else CacheHit(response=output.model_dump(), key=key)
 
 
 def lookup(access: CacheAccess, kwargs: Mapping[str, object]) -> CacheHit | None:

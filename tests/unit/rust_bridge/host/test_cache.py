@@ -39,8 +39,8 @@ MESSAGES_EVENTS: Final = (
 )
 
 
-def response_output(value: object) -> ResponseOutput:
-    return ResponseOutput(kind="Response", value=value)
+def response_output(value: object) -> dict[str, object]:
+    return ResponseOutput(value=value).model_dump()
 
 
 def configure(monkeypatch: pytest.MonkeyPatch, cache: Cache) -> Cache:
@@ -232,7 +232,7 @@ async def test_async_store_omits_the_memory_tier_when_tiered_writes_are_disabled
 def stored_entry(cache: Cache, request: dict[str, object]) -> object:
     raw: Final = EntryFormat(
         entry=RESPONSE_ENTRY.entry,
-        output=lambda entry, _: ResponseOutput(kind="Response", value=entry),
+        output=lambda entry, _: ResponseOutput(value=entry),
         tiered_writes=True,
     )
     hit: Final = lookup(_cache_access(cache, entry_format=raw), request)
@@ -242,7 +242,7 @@ def stored_entry(cache: Cache, request: dict[str, object]) -> object:
 def test_a_messages_stream_is_stored_as_the_legacy_event_list_and_replayed() -> None:
     cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
     cache_access: Final = _cache_access(cache, entry_format=MESSAGES_ENTRY)
-    stream: Final = StreamOutput(kind="Stream", value="".join(MESSAGES_EVENTS))
+    stream: Final = StreamOutput(value="".join(MESSAGES_EVENTS)).model_dump()
 
     store(cache_access, stream, STREAM_REQUEST)
     hit: Final = lookup(cache_access, STREAM_REQUEST)
@@ -255,7 +255,7 @@ def test_a_messages_stream_is_stored_as_the_legacy_event_list_and_replayed() -> 
 def test_a_stream_on_a_route_without_a_stream_entry_is_not_stored() -> None:
     cache: Final = Cache(type=LiteLLMCacheType.LOCAL)
 
-    store(_cache_access(cache), StreamOutput(kind="Stream", value="".join(MESSAGES_EVENTS)), STREAM_REQUEST)
+    store(_cache_access(cache), StreamOutput(value="".join(MESSAGES_EVENTS)).model_dump(), STREAM_REQUEST)
 
     assert stored_entry(cache, STREAM_REQUEST) is None
 

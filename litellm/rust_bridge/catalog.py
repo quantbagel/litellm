@@ -174,7 +174,6 @@ RESPONSES_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
 }
 
 RULES: Final[Rules] = (
-    RouteRule(Route.CHAT_COMPLETIONS, Rollout.PYTHON_ONLY, features=COMMON_PYTHON_FEATURES),
     RouteRule(Route.CHAT_COMPLETIONS, Rollout.PYTHON_ONLY),
     RouteRule(Route.EMBEDDINGS, Rollout.PYTHON_ONLY),
     RouteRule(Route.OCR, Rollout.RUST_REQUIRED),
