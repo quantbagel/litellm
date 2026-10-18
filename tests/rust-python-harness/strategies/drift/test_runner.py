@@ -5,6 +5,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 import pytest
@@ -63,6 +64,7 @@ def _manifest(
         ("messages", ("litellm/messages/", "litellm/common.py"), ("litellm-rust/messages.rs",)),
         ("responses", ("litellm/responses/", "litellm/common.py"), ("litellm-rust/responses.rs",)),
     ),
+    mapping_checkpoints: MappingProxyType[str, dict[str, str]] = MappingProxyType({}),
 ) -> Path:
     path: Final = root / "drift.json"
     path.write_text(
@@ -73,7 +75,12 @@ def _manifest(
                 **({"checkpoint_state": checkpoint_state} if checkpoint_state is not None else {}),
                 "candidate_paths": candidates,
                 "mappings": tuple(
-                    {"id": identifier, "python_paths": python_paths, "rust_paths": rust_paths}
+                    {
+                        "id": identifier,
+                        "python_paths": python_paths,
+                        "rust_paths": rust_paths,
+                        **mapping_checkpoints.get(identifier, {}),
+                    }
                     for identifier, python_paths, rust_paths in mappings
                 ),
             },
@@ -125,6 +132,74 @@ def test_reports_python_rust_shared_and_unmapped_changes_with_real_patches(repos
     assert "+    return 'after'" in python_change.patch
     assert result.manifest_sha256 == hashlib.sha256(original_manifest).hexdigest()
     assert manifest.read_bytes() == original_manifest
+
+
+def test_mapping_checkpoint_reports_only_its_paths_and_commits_since_that_checkpoint(repository: Repository) -> None:
+    _write(repository.root, "litellm/messages/handler.py", "def result():\n    return 'ported'\n")
+    checkpoint: Final = _commit(repository.root)
+    _write(repository.root, "litellm/responses/handler.py", "ENABLED = True\n")
+    _git(repository.root, "add", "--all")
+    _git(repository.root, "commit", "--quiet", "-m", "feat: unrelated responses work")
+    _write(repository.root, "litellm/messages/handler.py", "def result():\n    return 'drifted'\n")
+    _git(repository.root, "add", "--all")
+    _git(repository.root, "commit", "--quiet", "-m", "fix: change messages result")
+    drifted: Final = _git(repository.root, "rev-parse", "HEAD")
+    manifest: Final = _manifest(
+        repository.root,
+        repository.baseline,
+        mapping_checkpoints=MappingProxyType(
+            {"messages": {"checkpoint_sha": checkpoint, "checkpoint_state": "aligned"}}
+        ),
+    )
+
+    result: Final = inspect_drift(repository.root, manifest)
+
+    assert isinstance(result, DriftReport), result
+    assert len(result.mapping_checkpoints) == 1
+    drift: Final = result.mapping_checkpoints[0]
+    assert (drift.id, drift.status, drift.checkpoint_sha, drift.checkpoint_state) == (
+        "messages",
+        "changes_found",
+        checkpoint,
+        "aligned",
+    )
+    assert tuple((commit.sha, commit.subject) for commit in drift.commits) == (
+        (drifted, "fix: change messages result"),
+    )
+    assert tuple((change.path, change.sides) for change in drift.changes) == (
+        ("litellm/messages/handler.py", ("python",)),
+    )
+    assert "-    return 'ported'" in drift.changes[0].patch
+    assert "+    return 'drifted'" in drift.changes[0].patch
+    assert "before" not in drift.changes[0].patch
+
+
+def test_mapping_checkpoint_at_target_has_no_changes(repository: Repository) -> None:
+    manifest: Final = _manifest(
+        repository.root,
+        repository.baseline,
+        mapping_checkpoints=MappingProxyType({"responses": {"checkpoint_sha": repository.baseline}}),
+    )
+
+    result: Final = inspect_drift(repository.root, manifest)
+
+    assert isinstance(result, DriftReport), result
+    assert tuple((drift.id, drift.status, drift.commits, drift.changes) for drift in result.mapping_checkpoints) == (
+        ("responses", "no_changes", (), ()),
+    )
+
+
+def test_mapping_checkpoint_state_requires_a_checkpoint_sha(repository: Repository) -> None:
+    manifest: Final = _manifest(
+        repository.root,
+        repository.baseline,
+        mapping_checkpoints=MappingProxyType({"messages": {"checkpoint_state": "aligned"}}),
+    )
+
+    result: Final = inspect_drift(repository.root, manifest)
+
+    assert isinstance(result, DriftError), result
+    assert "'messages'" in result.message
 
 
 def test_patch_is_usable_when_git_diff_colors_are_forced(repository: Repository) -> None:

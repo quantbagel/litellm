@@ -21,6 +21,8 @@ class _Mapping(BaseModel):
     id: Annotated[str, Field(min_length=1)]
     python_paths: _Paths
     rust_paths: _Paths
+    checkpoint_sha: _Sha | None = None
+    checkpoint_state: CheckpointState = "unknown"
 
 
 class _Manifest(BaseModel):
@@ -60,6 +62,24 @@ class DriftChange(BaseModel):
     patch: str
 
 
+class DriftCommit(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    sha: str
+    subject: str
+
+
+class MappingDrift(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    status: Literal["changes_found", "no_changes"]
+    checkpoint_sha: str
+    checkpoint_state: CheckpointState
+    commits: tuple[DriftCommit, ...]
+    changes: tuple[DriftChange, ...]
+
+
 class WorkingTreeChange(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -82,6 +102,7 @@ class DriftReport(BaseModel):
     mappings: tuple[_Mapping, ...]
     changes: tuple[DriftChange, ...]
     unclassified: tuple[DriftChange, ...]
+    mapping_checkpoints: tuple[MappingDrift, ...]
     working_tree_changes: tuple[WorkingTreeChange, ...]
 
 
@@ -115,6 +136,16 @@ def _read_manifest(source: str, label: str) -> _Manifest | DriftError:
         return DriftError(f"Invalid manifest {label}: {error}")
     if manifest.checkpoint_sha is None and manifest.checkpoint_state != "unknown":
         return DriftError(f"Invalid manifest {label}: checkpoint state requires a checkpoint SHA")
+    stateless: Final = next(
+        (
+            mapping.id
+            for mapping in manifest.mappings
+            if mapping.checkpoint_sha is None and mapping.checkpoint_state != "unknown"
+        ),
+        None,
+    )
+    if stateless is not None:
+        return DriftError(f"Invalid manifest {label}: mapping {stateless!r} checkpoint state requires a checkpoint SHA")
     selectors: Final = tuple(chain(manifest.candidate_paths, _mapping_paths(manifest.mappings)))
     invalid: Final = next((path for path in selectors if not _valid_selector(path)), None)
     if invalid is not None:
@@ -332,12 +363,51 @@ def _changed_files(
     return tuple(report for report in reports if isinstance(report, DriftChange))
 
 
+def _commits(
+    repo_root: Path, baseline: str, target: str, paths: tuple[str, ...]
+) -> tuple[DriftCommit, ...] | DriftError:
+    source: Final = _git(
+        repo_root, "log", "-z", "--no-color", "--format=%H%x00%s", f"{baseline}..{target}", "--", *paths
+    )
+    if isinstance(source, DriftError):
+        return source
+    fields: Final = iter(source.split("\0"))
+    return tuple(DriftCommit(sha=sha, subject=subject) for sha, subject in zip(fields, fields) if sha)
+
+
+def _mapping_drift(repo_root: Path, target: str, mapping: _Mapping) -> MappingDrift | DriftError | None:
+    if mapping.checkpoint_sha is None:
+        return None
+    checkpoint: Final = _commit(repo_root, mapping.checkpoint_sha)
+    if isinstance(checkpoint, DriftError):
+        return checkpoint
+    paths: Final = (*mapping.python_paths, *mapping.rust_paths)
+    changes: Final = _changed_files(repo_root, checkpoint, target, paths, (mapping,))
+    if isinstance(changes, DriftError):
+        return changes
+    commits: Final = _commits(repo_root, checkpoint, target, paths)
+    if isinstance(commits, DriftError):
+        return commits
+    return MappingDrift(
+        id=mapping.id,
+        status="changes_found" if changes else "no_changes",
+        checkpoint_sha=checkpoint,
+        checkpoint_state=mapping.checkpoint_state,
+        commits=commits,
+        changes=changes,
+    )
+
+
 def _merged_mapping(identifier: str, mappings: tuple[_Mapping, ...]) -> _Mapping:
     matching: Final = tuple(mapping for mapping in mappings if mapping.id == identifier)
     python: Final = chain.from_iterable(mapping.python_paths for mapping in matching)
     rust: Final = chain.from_iterable(mapping.rust_paths for mapping in matching)
     return _Mapping(
-        id=identifier, python_paths=tuple(sorted(frozenset(python))), rust_paths=tuple(sorted(frozenset(rust)))
+        id=identifier,
+        python_paths=tuple(sorted(frozenset(python))),
+        rust_paths=tuple(sorted(frozenset(rust))),
+        checkpoint_sha=matching[-1].checkpoint_sha,
+        checkpoint_state=matching[-1].checkpoint_state,
     )
 
 
@@ -369,6 +439,10 @@ def _report(
     working: Final = _working_changes(repo_root, selectors)
     if isinstance(working, DriftError):
         return working
+    drifts: Final = tuple(_mapping_drift(repo_root, target, mapping) for mapping in manifest.mappings)
+    drift_error: Final = next((drift for drift in drifts if isinstance(drift, DriftError)), None)
+    if drift_error is not None:
+        return drift_error
     status: Final = "unreviewed" if manifest.checkpoint_sha is None else "changes_found" if changes else "no_changes"
     return DriftReport(
         status=status,
@@ -382,6 +456,7 @@ def _report(
         mappings=mappings,
         changes=changes,
         unclassified=tuple(change for change in changes if not change.mapping_ids),
+        mapping_checkpoints=tuple(drift for drift in drifts if isinstance(drift, MappingDrift)),
         working_tree_changes=working,
     )
 
