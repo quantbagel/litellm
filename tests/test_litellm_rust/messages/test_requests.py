@@ -143,6 +143,9 @@ async def test_optional_positional_body_parameters_reach_the_wire(server: Record
     response: Final = await litellm.anthropic_messages(*args, api_key="test-key", api_base=server.base_url)
 
     assert isinstance(response, dict)
+    assert response["id"] == MESSAGES_RESPONSE["id"]
+    body, _ = sent(server)
+    assert (body["metadata"], body["system"], body["temperature"]) == (args[3], args[6], args[7])
 
 
 @pytest.mark.asyncio
@@ -177,6 +180,3 @@ async def test_client_cache_control_is_preserved_and_suppresses_gateway_defaults
     assert body["system"] == "stable prefix"
     assert body["messages"] == messages
     assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
-    assert response["id"] == MESSAGES_RESPONSE["id"]
-    body, _ = sent(server)
-    assert (body["metadata"], body["system"], body["temperature"]) == (args[3], args[6], args[7])

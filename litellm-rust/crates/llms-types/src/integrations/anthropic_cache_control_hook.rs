@@ -5,14 +5,14 @@ use serde_json::{Map, Value};
 
 use crate::formats::messages::CacheControl;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Index(i64),
     Role(Role),
     None,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Role(pub String);
 
 impl Serialize for Role {
@@ -48,6 +48,7 @@ impl fmt::Display for Role {
     strum::Display,
     strum::EnumString,
     strum::IntoStaticStr,
+    strum::VariantArray,
     serde_with::DeserializeFromStr,
     serde_with::SerializeDisplay,
 )]
@@ -95,24 +96,14 @@ impl<'de> Deserialize<'de> for CacheControlInjectionPoint {
                         .unwrap_or_else(|_| role_target(object)),
                     _ => role_target(object),
                 };
-                let control = object
-                    .get("control")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(serde::de::Error::custom)?;
+                let control = point_control(object).map_err(serde::de::Error::custom)?;
                 Ok(Self::Message(CacheControlMessageInjectionPoint {
                     target,
                     control,
                 }))
             }
             Some("tool_config") => {
-                let control = object
-                    .get("control")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(serde::de::Error::custom)?;
+                let control = point_control(object).map_err(serde::de::Error::custom)?;
                 Ok(Self::ToolConfig { control })
             }
             _ => Ok(Self::Unknown(value)),
@@ -163,6 +154,15 @@ impl Serialize for CacheControlInjectionPoint {
     }
 }
 
+fn point_control(object: &Map<String, Value>) -> serde_json::Result<Option<CacheControl>> {
+    object
+        .get("control")
+        .filter(|control| !control.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+}
+
 fn role_target(object: &Map<String, Value>) -> Target {
     object
         .get("role")
@@ -211,8 +211,19 @@ mod tests {
             control: None,
         })
     )]
+    #[case::message_null_control(
+        json!({"location": "message", "index": 0, "control": null}),
+        CacheControlInjectionPoint::Message(CacheControlMessageInjectionPoint {
+            target: Target::Index(0),
+            control: None,
+        })
+    )]
     #[case::tool_config_without_control(
         json!({"location": "tool_config"}),
+        CacheControlInjectionPoint::ToolConfig { control: None }
+    )]
+    #[case::tool_config_null_control(
+        json!({"location": "tool_config", "control": null}),
         CacheControlInjectionPoint::ToolConfig { control: None }
     )]
     fn known_points_preserve_optional_control(
@@ -223,6 +234,13 @@ mod tests {
             serde_json::from_value::<CacheControlInjectionPoint>(input).unwrap(),
             expected
         );
+    }
+
+    #[rstest]
+    #[case::message(json!({"location": "message", "index": 0, "control": "ephemeral"}))]
+    #[case::tool_config(json!({"location": "tool_config", "control": 5}))]
+    fn malformed_controls_are_rejected(#[case] input: Value) {
+        assert!(serde_json::from_value::<CacheControlInjectionPoint>(input).is_err());
     }
 
     #[rstest]

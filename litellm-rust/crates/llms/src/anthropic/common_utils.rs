@@ -10,7 +10,7 @@ use litellm_llms_types::{
         MessagesTool, SystemPrompt,
     },
     providers::anthropic::{
-        API_BASE, API_KEY_HEADER, AnthropicBeta, BETA_HEADER, BetaSet,
+        API_BASE, API_KEY_HEADER, AnthropicBeta, BETA_HEADER, BILLING_HEADER_PREFIX, BetaSet,
         DIRECT_BROWSER_ACCESS_HEADER, MESSAGES_PATH,
     },
     recognized::Recognized,
@@ -45,45 +45,42 @@ pub fn is_claude_code_one_shot_subagent_request(
     {
         return false;
     }
-    let message = &request.messages[0];
-    if message.role != "user" {
-        return false;
-    }
-    let system = request
-        .params
-        .system
-        .as_ref()
-        .and_then(|system| serde_json::to_value(system).ok());
-    system.is_some_and(is_claude_code_subagent_billing_system)
+    request.messages[0].role == "user"
+        && request
+            .params
+            .system
+            .as_ref()
+            .is_some_and(is_claude_code_subagent_billing_system)
 }
 
-fn is_claude_code_subagent_billing_system(system: Value) -> bool {
-    let texts: Option<Vec<&str>> = match &system {
-        Value::String(text) => Some(vec![text]),
-        Value::Array(blocks) => blocks
+fn is_claude_code_subagent_billing_system(system: &SystemPrompt) -> bool {
+    let texts: Option<Vec<&str>> = match system {
+        SystemPrompt::Text(text) => Some(vec![text.as_str()]),
+        SystemPrompt::Blocks(blocks) => blocks
             .iter()
             .map(|block| {
-                let object = block.as_object()?;
-                (object.get("type")?.as_str()? == "text")
-                    .then(|| object.get("text")?.as_str())
+                block
+                    .is_type(ContentBlockType::Text)
+                    .then_some(block.text.as_deref())
                     .flatten()
             })
             .collect(),
-        _ => None,
     };
-    let Some(texts) = texts else {
-        return false;
-    };
-    let texts: Vec<&str> = texts
+    let meaningful: Vec<&str> = texts
         .into_iter()
+        .flatten()
         .filter(|text| !text.trim().is_empty())
         .collect();
-    if texts.is_empty() {
+    if meaningful.is_empty() {
         return false;
     }
-    let subagent_values: Vec<&str> = texts
-        .iter()
-        .filter_map(|text| claude_code_billing_fields(text))
+    let fields: Option<Vec<Vec<(&str, &str)>>> = meaningful
+        .into_iter()
+        .map(claude_code_billing_fields)
+        .collect();
+    let subagent_values: Vec<&str> = fields
+        .into_iter()
+        .flatten()
         .flatten()
         .filter_map(|(key, value)| (key == "cc_is_subagent").then_some(value))
         .collect();
@@ -95,7 +92,7 @@ fn claude_code_billing_fields(text: &str) -> Option<Vec<(&str, &str)>> {
     if stripped.contains(['\n', '\r']) {
         return None;
     }
-    let fields = stripped.strip_prefix("x-anthropic-billing-header:")?;
+    let fields = stripped.strip_prefix(BILLING_HEADER_PREFIX)?;
     let parsed: Option<Vec<(&str, &str)>> = fields
         .split(';')
         .filter(|field| !field.trim().is_empty())
@@ -474,8 +471,6 @@ pub fn is_encrypted_reasoning_block(block: &ContentBlock) -> bool {
     };
     field.is_some_and(|value| value.starts_with(ENCRYPTED_REASONING_SIGNATURE_PREFIX))
 }
-
-const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
 
 fn is_billing_header_block(block: &ContentBlock) -> bool {
     block.block_type == Some(ContentBlockType::Text)
@@ -2064,6 +2059,12 @@ mod tests {
         None,
         false
     )]
+    #[case::billing_header_with_instructions(
+        "claude-code/1.0",
+        "x-anthropic-billing-header: cc_is_subagent=true\nYou are a helpful agent",
+        None,
+        false
+    )]
     #[case::nonempty_tools(
         "claude-code/1.0",
         "x-anthropic-billing-header: cc_is_subagent=true",
@@ -2097,8 +2098,19 @@ mod tests {
     #[case::empty_text_blocks_are_ignored(json!([
         {"type": "text", "text": ""},
         {"type": "text", "text": "x-anthropic-billing-header: cc_is_subagent=true"}
-    ]))]
-    fn one_shot_subagent_ignores_empty_system_text_blocks(#[case] system: Value) {
+    ]), true)]
+    #[case::billing_block_beside_instructions(json!([
+        {"type": "text", "text": "x-anthropic-billing-header: cc_is_subagent=true"},
+        {"type": "text", "text": "Answer the delegated question"}
+    ]), false)]
+    #[case::non_text_block(json!([
+        {"type": "text", "text": "x-anthropic-billing-header: cc_is_subagent=true"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}
+    ]), false)]
+    fn one_shot_subagent_requires_every_system_text_to_be_a_billing_header(
+        #[case] system: Value,
+        #[case] expected: bool,
+    ) {
         let request: MessagesRequest = serde_json::from_value(json!({
             "model": "claude-test",
             "max_tokens": 16,
@@ -2107,9 +2119,9 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(is_claude_code_one_shot_subagent_request(
-            &request,
-            Some("claude-cli/1.0")
-        ));
+        assert_eq!(
+            is_claude_code_one_shot_subagent_request(&request, Some("claude-cli/1.0")),
+            expected
+        );
     }
 }

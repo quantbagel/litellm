@@ -15,7 +15,8 @@ from litellm.rust_bridge import failures
 from litellm.rust_bridge.public_call import known_params, optional_str
 from litellm.types.llms.anthropic_messages.anthropic_response import AnthropicMessagesResponse
 
-_DROP_PATHS: Final = TypeAdapter(list[object])
+_OBJECTS: Final = TypeAdapter(tuple[object, ...])
+_STR_MAPPING: Final = TypeAdapter(Mapping[str, object])
 _BODY_FIELDS: Final = frozenset(
     {
         "max_tokens",
@@ -91,32 +92,36 @@ def _drop_params(kwargs: Mapping[str, object]) -> bool:
     return bool(litellm.drop_params) or normalize_drop_params(kwargs.get("drop_params")) is True
 
 
-def _additional_drop_params(kwargs: Mapping[str, object]) -> tuple[str, ...]:
+def _objects(value: object) -> tuple[object, ...]:
     try:
-        configured: Final = _DROP_PATHS.validate_python(kwargs.get("additional_drop_params"))
+        return _OBJECTS.validate_python(value)
     except ValidationError:
         return ()
-    return tuple(path for path in configured if isinstance(path, str))
+
+
+def _additional_drop_params(kwargs: Mapping[str, object]) -> tuple[str, ...]:
+    return tuple(path for path in _objects(kwargs.get("additional_drop_params")) if isinstance(path, str))
+
+
+def _str_mapping(value: object) -> Mapping[str, object] | None:
+    try:
+        return _STR_MAPPING.validate_python(value)
+    except ValidationError:
+        return None
 
 
 def _cache_control_injection_points(kwargs: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
-    value: Final = kwargs.get("cache_control_injection_points")
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return ()
-    return tuple(item for item in value if isinstance(item, Mapping))
+    points: Final = (_str_mapping(item) for item in _objects(kwargs.get("cache_control_injection_points")))
+    return tuple(point for point in points if point is not None)
 
 
 def _user_agent(kwargs: Mapping[str, object]) -> str | None:
-    request: Final = kwargs.get("proxy_server_request")
-    if not isinstance(request, Mapping):
-        return None
-    headers: Final = request.get("headers")
-    if not isinstance(headers, Mapping):
-        return None
-    for key, value in headers.items():
-        if isinstance(key, str) and key.lower() == "user-agent" and isinstance(value, str):
-            return value
-    return None
+    request: Final = _str_mapping(kwargs.get("proxy_server_request")) or {}
+    headers: Final = _str_mapping(request.get("headers")) or {}
+    return next(
+        (value for key, value in headers.items() if key.lower() == "user-agent" and isinstance(value, str)),
+        None,
+    )
 
 
 def _prompt_caching_ttl() -> str | None:
@@ -138,9 +143,3 @@ def settings(kwargs: Mapping[str, object]) -> dict[str, object]:
             user_agent=_user_agent(kwargs),
         )
     )
-
-
-def record_gateway_injection(arguments: Mapping[str, object], added: int) -> None:
-    from litellm.integrations.anthropic_cache_control_hook import AnthropicCacheControlHook
-
-    AnthropicCacheControlHook.record_gateway_injection(arguments, added)
