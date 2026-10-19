@@ -112,9 +112,6 @@ _FEATURES: Final[detectors.Detectors] = MappingProxyType(
         Feature.SAFEGUARDS_CLASSIFIER: lambda request: native_route_classifies(
             str(request.resolved["model"]), request.resolved.get("safeguards")
         ),
-        Feature.PRE_REQUEST_HOOK: detectors.pre_request_hook,
-        Feature.WEBSEARCH_INTERCEPTION: detectors.websearch_interception,
-        Feature.MESSAGES_INTERCEPTOR: _intercepted,
         Feature.RESPONSE_CACHE: detectors.response_cache,
         Feature.MODIFY_PARAMS: detectors.modify_params,
         Feature.WORKLOAD_IDENTITY: detectors.anthropic_workload_identity,
@@ -124,8 +121,17 @@ _FEATURES: Final[detectors.Detectors] = MappingProxyType(
     }
 )
 
+_ASYNC_FEATURES: Final[detectors.Detectors] = MappingProxyType(
+    {
+        **_FEATURES,
+        Feature.PRE_REQUEST_HOOK: detectors.pre_request_hook,
+        Feature.WEBSEARCH_INTERCEPTION: detectors.websearch_interception,
+        Feature.MESSAGES_INTERCEPTOR: _intercepted,
+    }
+)
 
-def _context(request: NativeCall) -> RouteContext:
+
+def _context(request: NativeCall, features: detectors.Detectors) -> RouteContext:
     requested_model: Final = str(request.resolved["model"])
     model, provider = _resolved(request)
     return RouteContext(
@@ -133,20 +139,20 @@ def _context(request: NativeCall) -> RouteContext:
         provider=provider,
         model=requested_model,
         target=_target(request, model, provider),
-        features=detectors.detected(_FEATURES, request),
+        features=detectors.detected(features, request),
     )
 
 
 _DISPATCH: Final = PublicDispatch(
     route=Route.MESSAGES,
     request=lambda args, kwargs: _public_request(_MESSAGES, args, kwargs),
-    context=_context,
+    context=lambda request: _context(request, _FEATURES),
 )
 
 _ADISPATCH: Final = PublicDispatch(
     route=Route.MESSAGES,
     request=lambda args, kwargs: _public_request(_AMESSAGES, args, kwargs),
-    context=_context,
+    context=lambda request: _context(request, _ASYNC_FEATURES),
 )
 
 

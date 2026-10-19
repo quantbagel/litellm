@@ -10,6 +10,7 @@ from litellm.chat_completions.dispatch import (
     _ADISPATCH,  # pyright: ignore[reportPrivateUsage]  # tests configured dispatch
     _DISPATCH,  # pyright: ignore[reportPrivateUsage]  # tests configured dispatch
 )
+from litellm.integrations.custom_logger import CustomLogger
 from litellm.rust_bridge.bindings import NativeBinding
 from litellm.rust_bridge.catalog import Feature, Route, RouteRule, Rules
 from litellm.rust_bridge.chat_completions.entrypoints import (
@@ -228,14 +229,55 @@ async def test_acompletion_marker_binds_positionals_by_the_sync_signature() -> N
     assert [(request.resolved["timeout"], request.resolved["functions"]) for request in captured] == [(30.0, None)]
 
 
+class _ChatAgentic(CustomLogger):
+    async def async_should_run_chat_completion_agentic_loop(
+        self, *args: object, **kwargs: object
+    ) -> tuple[bool, dict[str, object]]:  # pyright: ignore[reportIncompatibleMethodOverride]  # test double only needs the override
+        return False, {}
+
+
 @pytest.mark.parametrize(
     ("feature", "kwargs", "settings"),
     (
         (Feature.MOCK_RESPONSE, {"mock_response": "hi"}, {}),
+        pytest.param(Feature.MOCK_RESPONSE, {"mock_tool_calls": [{"id": "call_1"}]}, {}, id="mock-tool-calls"),
+        pytest.param(Feature.MOCK_RESPONSE, {"mock_timeout": True}, {}, id="mock-timeout"),
         (Feature.CALLER_CLIENT, {"client": object()}, {}),
         (Feature.TIMEOUT_VARIANTS, {"request_timeout": 5}, {}),
+        (Feature.AGENTIC_LOOP_HOOK, {}, {"callbacks": [_ChatAgentic()]}),
         (Feature.TLS_POLICY, {}, {"ssl_security_level": "DEFAULT@SECLEVEL=1"}),
         (Feature.RESPONSE_CACHE, {}, {"cache": Cache()}),
+        (Feature.STREAMING, {"stream": True}, {}),
+        (Feature.DROP_PARAMS, {}, {"drop_params": True}),
+        (Feature.MODIFY_PARAMS, {}, {"modify_params": True}),
+        (Feature.EXTRA_BODY, {"extra_body": {"top_k": 1}}, {}),
+        (Feature.RETRIES_FALLBACKS, {"num_retries": 2}, {}),
+        pytest.param(
+            Feature.RETRIES_FALLBACKS,
+            {"context_window_fallback_dict": {"anthropic/claude-sonnet-4-5": "anthropic/claude-opus-4-5"}},
+            {},
+            id="context-window-fallbacks",
+        ),
+        pytest.param(
+            Feature.RETRIES_FALLBACKS,
+            {},
+            {"model_fallbacks": [{"anthropic/claude-sonnet-4-5": ["anthropic/claude-opus-4-5"]}]},
+            id="model-fallbacks",
+        ),
+        (Feature.PROMPT_MANAGEMENT, {"prompt_id": "welcome"}, {}),
+        pytest.param(Feature.PROMPT_MANAGEMENT, {"model": "litellm_agent/gpt-5"}, {}, id="litellm-agent-model"),
+        (Feature.CACHE_CONTROL_INJECTION, {"enable_prompt_caching": True}, {}),
+        (Feature.MODEL_PARAM_GATING, {"logit_bias": {"1": 1}}, {}),
+        (
+            Feature.MODEL_LIST,
+            {"model_list": [{"model_name": "anthropic/claude-sonnet-4-5", "litellm_params": {"model": "gpt-5"}}]},
+            {},
+        ),
+        (
+            Feature.MODEL_ALIAS_MAP,
+            {},
+            {"model_alias_map": {"anthropic/claude-sonnet-4-5": "anthropic/claude-opus-4-5"}},
+        ),
     ),
 )
 def test_each_detected_feature_reaches_its_rule(
@@ -261,6 +303,11 @@ def test_each_detected_feature_reaches_its_rule(
     monkeypatch.setattr(litellm, "callbacks", [])
     monkeypatch.setattr(litellm, "ssl_security_level", None)
     monkeypatch.setattr(litellm, "cache", None)
+    monkeypatch.setattr(litellm, "model_alias_map", {})
+    for name in ("num_retries", "model_fallbacks"):
+        monkeypatch.setattr(litellm, name, None)
+    for name in ("drop_params", "modify_params", "enable_anthropic_prompt_caching"):
+        monkeypatch.setattr(litellm, name, False)
     for name in ("SSL_SECURITY_LEVEL", "SSL_ECDH_CURVE"):
         monkeypatch.delenv(name, raising=False)
     assert served({}) is native_result

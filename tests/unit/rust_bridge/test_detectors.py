@@ -50,6 +50,21 @@ def _wrap_nested_level(value: object, depth: int) -> object:
     (
         (detectors.mock_response, {"mock_response": "hi"}, True),
         (detectors.mock_response, {"mock_response": None}, False),
+        (detectors.mock_response, {"mock_tool_calls": [{"id": "call_1"}]}, False),
+        (detectors.chat_mock_response, {"mock_response": "hi"}, True),
+        (detectors.chat_mock_response, {"mock_tool_calls": [{"id": "call_1"}]}, True),
+        (detectors.chat_mock_response, {"mock_timeout": True}, True),
+        (detectors.chat_mock_response, {"mock_tool_calls": [], "mock_timeout": False}, False),
+        (detectors.client_headers, {"headers": {"x-tenant": "a"}}, True),
+        (detectors.client_headers, {"headers": {}}, False),
+        (detectors.client_headers, {"headers": None}, False),
+        (detectors.model_list, {"model_list": [{"model_name": "gpt-5", "litellm_params": {"model": "gpt-5"}}]}, True),
+        (detectors.model_list, {"model_list": None}, False),
+        (detectors.chat_retries_fallbacks, {"context_window_fallback_dict": {"gpt-5": "gpt-5-mini"}}, True),
+        (detectors.chat_retries_fallbacks, {"fallbacks": ["gpt-5-mini"]}, True),
+        (detectors.retries_fallbacks, {"context_window_fallback_dict": {"gpt-5": "gpt-5-mini"}}, False),
+        (detectors.prompt_management, {"model": "litellm_agent/gpt-5"}, True),
+        (detectors.prompt_management, {"model": "gpt-5"}, False),
         (detectors.caller_client, {"client": object()}, True),
         (detectors.caller_client, {"shared_session": object()}, True),
         (detectors.caller_client, {"client": None, "shared_session": None}, False),
@@ -172,6 +187,16 @@ def test_cache_control_marks_handles_deeply_nested_input() -> None:
             False,
             id="native-tool-call-id",
         ),
+        pytest.param(
+            [{"type": "custom_tool_call", "call_id": "call_1", "name": "f", "input": "x", "namespace": "ns"}],
+            True,
+            id="custom-tool-call-namespace",
+        ),
+        pytest.param(
+            [{"type": "custom_tool_call", "call_id": "call_1", "name": "f", "input": "x"}],
+            False,
+            id="custom-tool-call",
+        ),
         pytest.param([{"type": "reasoning", "id": "rs_1", "summary": list[object]()}], False, id="native-reasoning"),
         pytest.param([{"role": "user", "content": "hi"}], False, id="message"),
         pytest.param("hi", False, id="string"),
@@ -193,6 +218,10 @@ def test_input_rewrite_preserves_caller_input(input_value: object, expected: boo
         (detectors.retries_fallbacks, "num_retries", 3, {}),
         (detectors.cache_control_injection, "enable_anthropic_prompt_caching", True, {}),
         (detectors.stream_cost_injection, "include_cost_in_streaming_usage", True, {"stream": True}),
+        (detectors.stream_cost_injection, "include_cost_in_streaming_usage", "true", {"stream": True}),
+        (detectors.chat_retries_fallbacks, "model_fallbacks", [{"gpt-5": ["gpt-5-mini"]}], {}),
+        (detectors.chat_retries_fallbacks, "num_retries", 3, {}),
+        (detectors.model_alias_map, "model_alias_map", {"gpt-5": "openai/gpt-5"}, {}),
     ),
 )
 def test_global_settings_are_detected(
@@ -204,7 +233,9 @@ def test_global_settings_are_detected(
 ) -> None:
     for name in ("drop_params", "modify_params", "enable_anthropic_prompt_caching", "include_cost_in_streaming_usage"):
         monkeypatch.setattr(litellm, name, False)
-    monkeypatch.setattr(litellm, "num_retries", None)
+    for name in ("num_retries", "model_fallbacks"):
+        monkeypatch.setattr(litellm, name, None)
+    monkeypatch.setattr(litellm, "model_alias_map", {})
     assert not detector(call(**kwargs))
     monkeypatch.setattr(litellm, setting, value)
     assert detector(call(**kwargs))
@@ -213,6 +244,33 @@ def test_global_settings_are_detected(
 def test_stream_cost_injection_needs_a_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(litellm, "include_cost_in_streaming_usage", True)
     assert not detectors.stream_cost_injection(call())
+
+
+def test_model_alias_map_applies_only_to_the_requested_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(litellm, "model_alias_map", {"fast": "openai/gpt-5-mini"})
+    assert detectors.model_alias_map(call(model="fast"))
+    assert not detectors.model_alias_map(call())
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    (
+        pytest.param({"temperature": 0.2}, True, id="gpt-5-temperature"),
+        pytest.param({"max_tokens": 16}, False, id="gpt-5-max-tokens"),
+        pytest.param({"model": "gpt-4o", "temperature": 0.2}, False, id="gpt-4o-temperature"),
+        pytest.param({"model": "anthropic/claude-sonnet-4-5", "logit_bias": {"1": 1}}, True, id="unsupported-param"),
+        pytest.param({"model": "anthropic/claude-sonnet-4-5", "n": 1}, False, id="langchain-default-n"),
+        pytest.param({"model": "anthropic/claude-sonnet-4-5", "n": 2}, True, id="unsupported-n"),
+        pytest.param({"model": "anthropic/claude-sonnet-4-5", "max_tokens": 16, "stream": True}, False, id="supported"),
+        pytest.param({"model": "unknown-model", "temperature": 0.2}, False, id="unresolved-provider"),
+        pytest.param({}, False, id="no-params"),
+    ),
+)
+def test_chat_model_param_gating_follows_the_provider_param_rules(
+    monkeypatch: pytest.MonkeyPatch, kwargs: Mapping[str, object], expected: bool
+) -> None:
+    monkeypatch.setattr(litellm, "drop_params", False)
+    assert detectors.chat_model_param_gating(call(**kwargs)) is expected
 
 
 def test_openai_workload_identity_applies_only_without_a_static_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -262,6 +320,18 @@ class _Agentic(CustomLogger):
         return False, {}
 
 
+class _ChatAgentic(CustomLogger):
+    async def async_should_run_chat_completion_agentic_loop(
+        self, *args: object, **kwargs: object
+    ) -> tuple[bool, dict[str, object]]:  # pyright: ignore[reportIncompatibleMethodOverride]  # test double only needs the override
+        return False, {}
+
+
+class _Deployment(CustomLogger):
+    async def async_pre_call_deployment_hook(self, *args: object, **kwargs: object) -> dict[str, object] | None:  # pyright: ignore[reportIncompatibleMethodOverride]  # test double only needs the override
+        return None
+
+
 @pytest.mark.parametrize(
     ("detector", "callbacks", "expected"),
     (
@@ -271,6 +341,12 @@ class _Agentic(CustomLogger):
         (detectors.pre_request_hook, ["not-a-logger"], False),
         (detectors.agentic_loop_hook, [_Agentic()], True),
         (detectors.agentic_loop_hook, [_Logger(), _Rewrite()], False),
+        (detectors.agentic_loop_hook, [_ChatAgentic()], False),
+        (detectors.chat_agentic_loop_hook, [_ChatAgentic()], True),
+        (detectors.chat_agentic_loop_hook, [_Agentic()], True),
+        (detectors.chat_agentic_loop_hook, [_Logger(), _Deployment()], False),
+        (detectors.deployment_hook, [_Deployment()], True),
+        (detectors.deployment_hook, [_Logger(), _Agentic(), _Rewrite()], False),
     ),
 )
 def test_callback_detectors_need_an_override(
@@ -301,8 +377,17 @@ def _logging_with(callback: CustomLogger) -> Logging:
         (detectors.agentic_loop_hook, {"litellm_logging_obj": _logging_with(_Agentic())}, True),
         (detectors.agentic_loop_hook, {"success_callback": [_Logger()]}, False),
         (detectors.pre_request_hook, {"success_callback": [_Rewrite()]}, False),
+        (detectors.chat_agentic_loop_hook, {"litellm_logging_obj": _logging_with(_ChatAgentic())}, True),
+        (detectors.deployment_hook, {"success_callback": [_Deployment()]}, True),
     ),
-    ids=("success-callback", "logging-object", "plain-logger", "pre-request-reads-globals-only"),
+    ids=(
+        "success-callback",
+        "logging-object",
+        "plain-logger",
+        "pre-request-reads-globals-only",
+        "chat-agentic-logging-object",
+        "deployment-success-callback",
+    ),
 )
 def test_callback_detectors_read_the_request_callbacks_the_handler_reads(
     monkeypatch: pytest.MonkeyPatch,

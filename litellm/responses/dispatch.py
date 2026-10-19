@@ -95,29 +95,34 @@ _FEATURES: Final[detectors.Detectors] = MappingProxyType(
         Feature.TOOL_SCHEMA_REPAIR: detectors.tool_schema_repair,
         Feature.MODEL_PARAM_GATING: detectors.model_param_gating,
         Feature.WORKLOAD_IDENTITY: detectors.openai_workload_identity,
+        Feature.CLIENT_HEADERS: detectors.client_headers,
     }
 )
 
+_SYNC_FEATURES: Final[detectors.Detectors] = MappingProxyType(
+    {**_FEATURES, Feature.DEPLOYMENT_HOOK: detectors.deployment_hook}
+)
 
-def _context(request: NativeCall) -> RouteContext:
+
+def _context(request: NativeCall, features: detectors.Detectors) -> RouteContext:
     return RouteContext(
         Route.RESPONSES,
         provider=_provider(request),
         model=str(request.resolved["model"]),
-        features=detectors.detected(_FEATURES, request),
+        features=detectors.detected(features, request),
     )
 
 
 _DISPATCH: Final = PublicDispatch(
     route=Route.RESPONSES,
     request=lambda args, kwargs: _public_request(_RESPONSES, args, kwargs),
-    context=_context,
+    context=lambda request: _context(request, _SYNC_FEATURES),
 )
 
 _ADISPATCH: Final = PublicDispatch(
     route=Route.RESPONSES,
     request=lambda args, kwargs: _public_request(_ARESPONSES, args, kwargs),
-    context=_context,
+    context=lambda request: _context(request, _FEATURES),
 )
 
 

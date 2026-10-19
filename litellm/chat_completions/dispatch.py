@@ -68,7 +68,19 @@ def _public_request(
 _FEATURES: Final[detectors.Detectors] = MappingProxyType(
     {
         **detectors.COMMON,
+        Feature.MOCK_RESPONSE: detectors.chat_mock_response,
+        Feature.AGENTIC_LOOP_HOOK: detectors.chat_agentic_loop_hook,
         Feature.RESPONSE_CACHE: detectors.response_cache,
+        Feature.STREAMING: detectors.streaming,
+        Feature.DROP_PARAMS: detectors.drop_params,
+        Feature.MODIFY_PARAMS: detectors.modify_params,
+        Feature.EXTRA_BODY: detectors.extra_body,
+        Feature.RETRIES_FALLBACKS: detectors.chat_retries_fallbacks,
+        Feature.PROMPT_MANAGEMENT: detectors.prompt_management,
+        Feature.CACHE_CONTROL_INJECTION: detectors.cache_control_injection,
+        Feature.MODEL_PARAM_GATING: detectors.chat_model_param_gating,
+        Feature.MODEL_LIST: detectors.model_list,
+        Feature.MODEL_ALIAS_MAP: detectors.model_alias_map,
     }
 )
 

@@ -246,6 +246,11 @@ class _Agentic(CustomLogger):
         return False, {}
 
 
+class _Deployment(CustomLogger):
+    async def async_pre_call_deployment_hook(self, *args: object, **kwargs: object) -> dict[str, object] | None:  # pyright: ignore[reportIncompatibleMethodOverride]  # test double only needs the override
+        return None
+
+
 ENCODED_ID: Final = ResponsesAPIRequestUtils._build_encrypted_item_id("deployment-1", "rs_1")  # pyright: ignore[reportPrivateUsage]  # the encoder litellm stamps on earlier turns
 
 
@@ -300,6 +305,8 @@ ENCODED_ID: Final = ResponsesAPIRequestUtils._build_encrypted_item_id("deploymen
         ),
         (Feature.TOOL_SCHEMA_REPAIR, {"tools": [{"type": "function", "name": "f", "parameters": "{}"}]}, {}),
         (Feature.MODEL_PARAM_GATING, {"max_output_tokens": 1}, {}),
+        (Feature.CLIENT_HEADERS, {"headers": {"x-tenant": "a"}}, {}),
+        (Feature.DEPLOYMENT_HOOK, {}, {"callbacks": [_Deployment()]}),
         (
             Feature.WORKLOAD_IDENTITY,
             {
@@ -344,6 +351,32 @@ def test_each_detected_feature_reaches_its_rule(
     for name, value in settings.items():
         monkeypatch.setattr(litellm, name, value)
     assert served(kwargs) is python_result
+
+
+@pytest.mark.asyncio
+async def test_deployment_hook_keeps_only_sync_calls_on_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    rules: Final = (
+        RouteRule(Route.RESPONSES, Rollout.PYTHON_ONLY, features=frozenset({Feature.DEPLOYMENT_HOOK})),
+        RouteRule(Route.RESPONSES, Rollout.RUST_REQUIRED),
+    )
+    native_result: Final = _response()
+
+    async def python(*call_args: object, **call_kwargs: object) -> ResponsesAPIResponse:  # kwargs-ok: stub
+        pytest.fail("the async handler leaves the deployment hook to the shared call wrapper")
+
+    async def native(request: NativeCall) -> ResponsesAPIResponse:
+        return native_result
+
+    monkeypatch.setattr(litellm, "callbacks", [_Deployment()])
+    result: Final = await _ADISPATCH.arun(
+        (),
+        {"model": "gpt-5", "input": INPUT},
+        python=python,
+        binding=aresponses_binding(native),
+        native=lambda hook, request, call_args, call_kwargs: hook(request),
+        rules=rules,
+    )
+    assert result is native_result
 
 
 @pytest.mark.parametrize(

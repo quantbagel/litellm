@@ -428,14 +428,6 @@ ADVISOR_TOOL: Final = {"type": ANTHROPIC_ADVISOR_TOOL_TYPE, "name": "advisor", "
         ),
         (Feature.CALLER_CLIENT, "anthropic/claude-sonnet-4-5", {"client": object()}, {}),
         (Feature.TIMEOUT_VARIANTS, "anthropic/claude-sonnet-4-5", {"request_timeout": 5}, {}),
-        (Feature.PRE_REQUEST_HOOK, "anthropic/claude-sonnet-4-5", {}, {"callbacks": [_Rewrite()]}),
-        (
-            Feature.WEBSEARCH_INTERCEPTION,
-            "anthropic/claude-sonnet-4-5",
-            {},
-            {"callbacks": [WebSearchInterceptionLogger()]},
-        ),
-        (Feature.MESSAGES_INTERCEPTOR, "deepseek/deepseek-v4-flash", {"tools": [ADVISOR_TOOL]}, {}),
         (Feature.AGENTIC_LOOP_HOOK, "anthropic/claude-sonnet-4-5", {}, {"callbacks": [_Agentic()]}),
         (Feature.RESPONSE_CACHE, "anthropic/claude-sonnet-4-5", {}, {"cache": Cache()}),
         (Feature.TLS_POLICY, "anthropic/claude-sonnet-4-5", {}, {"ssl_security_level": "DEFAULT@SECLEVEL=1"}),
@@ -501,18 +493,82 @@ def test_each_detected_feature_reaches_its_rule(
     assert served(kwargs) is python_result
 
 
-def test_interceptor_feature_follows_the_resolved_provider() -> None:
+ASYNC_ONLY_FEATURES: Final = (
+    pytest.param(Feature.PRE_REQUEST_HOOK, {}, {"callbacks": [_Rewrite()]}, id="pre-request-hook"),
+    pytest.param(
+        Feature.WEBSEARCH_INTERCEPTION, {}, {"callbacks": [WebSearchInterceptionLogger()]}, id="websearch-interception"
+    ),
+    pytest.param(
+        Feature.MESSAGES_INTERCEPTOR,
+        {"model": "deepseek/deepseek-v4-flash", "tools": [ADVISOR_TOOL]},
+        {},
+        id="messages-interceptor",
+    ),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("feature", "kwargs", "settings"), ASYNC_ONLY_FEATURES)
+async def test_handler_hooks_the_sync_entry_never_runs_keep_only_async_calls_on_python(
+    monkeypatch: pytest.MonkeyPatch, feature: Feature, kwargs: Mapping[str, object], settings: Mapping[str, object]
+) -> None:
+    rules: Final[Rules] = (
+        RouteRule(Route.MESSAGES, Rollout.PYTHON_ONLY, features=frozenset({feature})),
+        RouteRule(Route.MESSAGES, Rollout.RUST_REQUIRED),
+    )
+    python_result: Final = response()
+    native_result: Final = response()
+    model: Final = str(kwargs.get("model", "anthropic/claude-sonnet-4-5"))
+    call_kwargs: Final = {name: value for name, value in kwargs.items() if name != "model"}
+
+    async def python(*call_args: object, **python_kwargs: object) -> AnthropicMessagesResponse:  # kwargs-ok: stub
+        return python_result
+
+    async def native(request: NativeCall) -> AnthropicMessagesResponse:
+        return native_result
+
+    monkeypatch.setattr(litellm, "callbacks", [])
+    for name, value in settings.items():
+        monkeypatch.setattr(litellm, name, value)
+    served_async: Final = await _ADISPATCH.arun(
+        (16, MESSAGES, model),
+        call_kwargs,
+        python=python,
+        binding=amessages_binding(native),
+        native=lambda hook, request, args, native_kwargs: hook(request),
+        rules=rules,
+    )
+    served_sync: Final = _DISPATCH.run(
+        (16, MESSAGES, model),
+        call_kwargs,
+        python=lambda *call_args, **python_kwargs: python_result,
+        binding=messages_binding(lambda request: native_result),
+        native=lambda hook, request, args, native_kwargs: hook(request),
+        rules=rules,
+    )
+    assert served_async is python_result
+    assert served_sync is native_result
+
+
+@pytest.mark.asyncio
+async def test_interceptor_feature_follows_the_resolved_provider() -> None:
     rules: Final[Rules] = (
         RouteRule(Route.MESSAGES, Rollout.PYTHON_ONLY, features=frozenset({Feature.MESSAGES_INTERCEPTOR})),
         RouteRule(Route.MESSAGES, Rollout.RUST_REQUIRED),
     )
     native_result: Final = response()
 
-    result: Final = _DISPATCH.run(
+    async def python(*call_args: object, **call_kwargs: object) -> AnthropicMessagesResponse:  # kwargs-ok: stub
+        pytest.fail("anthropic serves the advisor tool itself")
+
+    async def native(request: NativeCall) -> AnthropicMessagesResponse:
+        return native_result
+
+    result: Final = await _ADISPATCH.arun(
         (16, MESSAGES, "claude-sonnet-4-5"),
         {"tools": [ADVISOR_TOOL], "custom_llm_provider": "anthropic"},
-        python=lambda *call_args, **call_kwargs: pytest.fail("anthropic serves the advisor tool itself"),
-        binding=messages_binding(lambda request: native_result),
+        python=python,
+        binding=amessages_binding(native),
         native=lambda hook, request, call_args, call_kwargs: hook(request),
         rules=rules,
     )

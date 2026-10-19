@@ -37,6 +37,26 @@ def mock_response(request: NativeCall) -> bool:
     return _present(request, "mock_response")
 
 
+def chat_mock_response(request: NativeCall) -> bool:
+    return (
+        mock_response(request)
+        or bool(request.resolved.get("mock_tool_calls"))
+        or bool(request.resolved.get("mock_timeout"))
+    )
+
+
+def client_headers(request: NativeCall) -> bool:
+    return bool(optional_mapping(request.resolved.get("headers")))
+
+
+def model_list(request: NativeCall) -> bool:
+    return _present(request, "model_list")
+
+
+def model_alias_map(request: NativeCall) -> bool:
+    return bool(litellm.model_alias_map) and str(request.resolved["model"]) in litellm.model_alias_map
+
+
 def caller_client(request: NativeCall) -> bool:
     return _present(request, "client") or _present(request, "shared_session")
 
@@ -71,10 +91,13 @@ def proxy_mcp_tools(request: NativeCall) -> bool:
 
 
 def prompt_management(request: NativeCall) -> bool:
+    from litellm.integrations.litellm_agent.litellm_agent_model_resolver import LITELLM_AGENT_PREFIX
     from litellm.types.utils import DynamicPromptManagementParamLiteral
 
-    return _present(request, "prompt_id") or any(
-        request.resolved.get(param) for param in DynamicPromptManagementParamLiteral.list_all_params()
+    return (
+        _present(request, "prompt_id")
+        or str(request.resolved["model"]).startswith(LITELLM_AGENT_PREFIX)
+        or any(request.resolved.get(param) for param in DynamicPromptManagementParamLiteral.list_all_params())
     )
 
 
@@ -96,6 +119,14 @@ def chat_completions_bridge(request: NativeCall) -> bool:
 def retries_fallbacks(request: NativeCall) -> bool:
     return bool(litellm.num_retries) or any(
         _present(request, name) for name in ("num_retries", "max_retries", "fallbacks", "retry_policy")
+    )
+
+
+def chat_retries_fallbacks(request: NativeCall) -> bool:
+    return (
+        retries_fallbacks(request)
+        or bool(optional_sequence(litellm.model_fallbacks))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # litellm annotates it with a bare list
+        or _present(request, "context_window_fallback_dict")
     )
 
 
@@ -150,7 +181,8 @@ def input_rewrite(request: NativeCall) -> bool:
         cast("ResponseInputParam", input_value),  # cast-ok: the handler accepts unvalidated input items
     )
     normalized: Final = config._validate_input_param(replayable)  # pyright: ignore[reportPrivateUsage]  # use the handler's normalization
-    return config._drop_foreign_tool_call_item_ids(normalized) != input_value  # pyright: ignore[reportPrivateUsage]  # use the handler's id cleanup
+    cleaned: Final = config._drop_foreign_tool_call_item_ids(normalized)  # pyright: ignore[reportPrivateUsage]  # use the handler's id cleanup
+    return config.strip_custom_tool_call_namespace_from_responses_input(cleaned) != input_value
 
 
 def _children(value: object) -> tuple[object, ...]:
@@ -223,6 +255,83 @@ def model_param_gating(request: NativeCall) -> bool:
     return mapped != params
 
 
+_CHAT_UNGATED: Final = frozenset(
+    {
+        "model",
+        "messages",
+        "custom_llm_provider",
+        "api_version",
+        "drop_params",
+        "allowed_openai_params",
+        "additional_drop_params",
+    }
+)
+_NAMES: Final = TypeAdapter(list[str])
+
+
+def _chat_non_default_params(request: NativeCall) -> Mapping[str, object]:
+    from litellm.constants import DEFAULT_CHAT_COMPLETION_PARAM_VALUES
+
+    defaults: Final = _PARAMS.validate_python(DEFAULT_CHAT_COMPLETION_PARAM_VALUES)
+    return {
+        name: value
+        for name, value in request.resolved.items()
+        if name in defaults and name not in _CHAT_UNGATED and value != defaults[name]
+    }
+
+
+def _chat_provider(request: NativeCall) -> tuple[str, str | None]:
+    from litellm.exceptions import BadRequestError
+    from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
+
+    model: Final = str(request.resolved["model"])
+    provider: Final = optional_str(request.resolved.get("custom_llm_provider"))
+    try:
+        resolved_model, resolved_provider, _, _ = get_llm_provider(model, provider, api_base=_api_base(request))
+    except BadRequestError:
+        return model, provider
+    return resolved_model, resolved_provider
+
+
+def _unvalidated(params: Mapping[str, object]) -> frozenset[str]:
+    from litellm.utils import PROVIDER_UNVALIDATED_PARAMS
+
+    return PROVIDER_UNVALIDATED_PARAMS | (frozenset({"n"}) if params.get("n") == 1 else frozenset[str]())
+
+
+def chat_model_param_gating(request: NativeCall) -> bool:
+    from litellm.exceptions import UnsupportedParamsError
+    from litellm.litellm_core_utils.get_supported_openai_params import (
+        get_supported_openai_params,  # pyright: ignore[reportUnknownVariableType]  # returns a bare list
+    )
+    from litellm.types.utils import LlmProviders
+    from litellm.utils import ProviderConfigManager
+
+    params: Final = _chat_non_default_params(request)
+    model, provider = _chat_provider(request)
+    if not params or provider is None:
+        return False
+    supported: Final = frozenset(_NAMES.validate_python(get_supported_openai_params(model, provider) or []))
+    if any(name not in supported for name in params.keys() - _unvalidated(params)):
+        return True
+    try:
+        llm_provider: Final = LlmProviders(provider)
+    except ValueError:
+        return False
+    config: Final = ProviderConfigManager.get_provider_chat_config(model, llm_provider)
+    if config is None:
+        return False
+    try:
+        strict: Final = _PARAMS.validate_python(
+            config.map_openai_params(dict(params), {}, model, drop_params=False)  # pyright: ignore[reportUnknownMemberType]  # returns a bare dict
+        )
+    except UnsupportedParamsError:
+        return True
+    return strict != _PARAMS.validate_python(
+        config.map_openai_params(dict(params), {}, model, drop_params=True)  # pyright: ignore[reportUnknownMemberType]  # returns a bare dict
+    )
+
+
 def openai_workload_identity(request: NativeCall) -> bool:
     from litellm.llms.openai.workload_identity import resolve_openai_workload_identity_config
 
@@ -268,7 +377,7 @@ def thinking_signature_retry(request: NativeCall) -> bool:
 
 
 def stream_cost_injection(request: NativeCall) -> bool:
-    return streaming(request) and litellm.include_cost_in_streaming_usage is True
+    return streaming(request) and bool(litellm.include_cost_in_streaming_usage)
 
 
 def drop_params(request: NativeCall) -> bool:
@@ -338,8 +447,22 @@ def pre_request_hook(_request: NativeCall) -> bool:
     return _overridden("async_pre_request_hook", litellm.callbacks)
 
 
+def _call_callbacks(request: NativeCall) -> tuple[object, ...]:
+    return (*litellm.callbacks, *_request_success_callbacks(request))
+
+
 def agentic_loop_hook(request: NativeCall) -> bool:
-    return _overridden("async_should_run_agentic_loop", (*litellm.callbacks, *_request_success_callbacks(request)))
+    return _overridden("async_should_run_agentic_loop", _call_callbacks(request))
+
+
+def chat_agentic_loop_hook(request: NativeCall) -> bool:
+    return agentic_loop_hook(request) or _overridden(
+        "async_should_run_chat_completion_agentic_loop", _call_callbacks(request)
+    )
+
+
+def deployment_hook(request: NativeCall) -> bool:
+    return _overridden("async_pre_call_deployment_hook", _call_callbacks(request))
 
 
 def websearch_interception(_request: NativeCall) -> bool:

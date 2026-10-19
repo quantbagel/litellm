@@ -96,6 +96,14 @@ class Feature(str, Enum):
     """litellm.include_cost_in_streaming_usage, where Python adds cost to streamed usage."""
     THINKING_SIGNATURE_RETRY = "thinking_signature_retry"
     """Replayed thinking blocks, which Python strips and retries once if Anthropic rejects their signature."""
+    CLIENT_HEADERS = "client_headers"
+    """Proxy-forwarded headers that Python merges into extra_headers."""
+    DEPLOYMENT_HOOK = "deployment_hook"
+    """A logger overriding async_pre_call_deployment_hook, which the sync Python handler runs itself."""
+    MODEL_LIST = "model_list"
+    """A model_list that Python fans out across its deployments."""
+    MODEL_ALIAS_MAP = "model_alias_map"
+    """A model that litellm.model_alias_map rewrites before the call."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +150,19 @@ COMMON_PYTHON_FEATURES: Final = frozenset(
     }
 )
 
-CHAT_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {Feature.RESPONSE_CACHE}
+CHAT_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
+    Feature.RESPONSE_CACHE,
+    Feature.STREAMING,
+    Feature.DROP_PARAMS,
+    Feature.MODIFY_PARAMS,
+    Feature.EXTRA_BODY,
+    Feature.RETRIES_FALLBACKS,
+    Feature.PROMPT_MANAGEMENT,
+    Feature.CACHE_CONTROL_INJECTION,
+    Feature.MODEL_PARAM_GATING,
+    Feature.MODEL_LIST,
+    Feature.MODEL_ALIAS_MAP,
+}
 
 MESSAGES_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
     Feature.SAFEGUARDS_CLASSIFIER,
@@ -177,6 +197,8 @@ RESPONSES_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
     Feature.TOOL_SCHEMA_REPAIR,
     Feature.MODEL_PARAM_GATING,
     Feature.WORKLOAD_IDENTITY,
+    Feature.CLIENT_HEADERS,
+    Feature.DEPLOYMENT_HOOK,
 }
 
 RULES: Final[Rules] = (
