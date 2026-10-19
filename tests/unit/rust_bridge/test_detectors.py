@@ -107,8 +107,6 @@ def _wrap_nested_level(value: object, depth: int) -> object:
         (detectors.tool_schema_repair, {"tools": [function_tool({"type": "string", "pattern": r"\p{L}"})]}, True),
         (detectors.tool_schema_repair, {"tools": [function_tool({"type": "object"})]}, False),
         (detectors.tool_schema_repair, {}, False),
-        (detectors.model_param_gating, {"max_output_tokens": 1}, True),
-        (detectors.model_param_gating, {"max_output_tokens": 1024}, False),
         (detectors.cache_control_injection, {"enable_prompt_caching": True}, True),
         (detectors.cache_control_injection, {"cache_control_injection_points": [{"location": "message"}]}, True),
         (detectors.cache_control_injection, {"cache_control_injection_points": []}, False),
@@ -116,13 +114,6 @@ def _wrap_nested_level(value: object, depth: int) -> object:
         (detectors.thinking_signature_retry, {"messages": [{"role": "assistant", "content": [REDACTED]}]}, True),
         (detectors.thinking_signature_retry, {"messages": [{"role": "assistant", "content": "done"}]}, False),
         (detectors.thinking_signature_retry, {"messages": [{"role": "user", "content": [{"type": "text"}]}]}, False),
-        (detectors.drop_params, {"drop_params": True}, True),
-        (detectors.drop_params, {"drop_params": False}, False),
-        (detectors.drop_params, {"drop_params": " True "}, True),
-        (detectors.drop_params, {"drop_params": "false"}, False),
-        (detectors.drop_params, {"drop_params": "maybe"}, False),
-        (detectors.drop_params, {"additional_drop_params": ["metadata.user_id"]}, True),
-        (detectors.drop_params, {"additional_drop_params": []}, False),
         (detectors.deployment_response_id, {"litellm_metadata": {"model_info": {"id": "deployment-1"}}}, True),
         (detectors.deployment_response_id, {"litellm_metadata": {"model_info": {}}}, False),
         (detectors.deployment_response_id, {"litellm_metadata": None}, False),
@@ -187,7 +178,6 @@ def test_input_rewrite_preserves_caller_input(input_value: object, expected: boo
 @pytest.mark.parametrize(
     ("detector", "setting", "value", "kwargs"),
     (
-        (detectors.drop_params, "drop_params", True, {}),
         (detectors.modify_params, "modify_params", True, {}),
         (detectors.retries_fallbacks, "num_retries", 3, {}),
         (detectors.cache_control_injection, "enable_anthropic_prompt_caching", True, {}),
@@ -201,7 +191,7 @@ def test_global_settings_are_detected(
     value: object,
     kwargs: Mapping[str, object],
 ) -> None:
-    for name in ("drop_params", "modify_params", "enable_anthropic_prompt_caching", "include_cost_in_streaming_usage"):
+    for name in ("modify_params", "enable_anthropic_prompt_caching", "include_cost_in_streaming_usage"):
         monkeypatch.setattr(litellm, name, False)
     monkeypatch.setattr(litellm, "num_retries", None)
     assert not detector(call(**kwargs))

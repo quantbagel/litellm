@@ -42,8 +42,6 @@ class Feature(str, Enum):
     """A caller-supplied HTTP client or shared session that Python sends through."""
     TIMEOUT_VARIANTS = "timeout_variants"
     """request_timeout, stream_timeout or httpx.Timeout phases beyond a plain timeout."""
-    DROP_PARAMS = "drop_params"
-    """drop_params or additional_drop_params dropping fields per provider."""
     MODIFY_PARAMS = "modify_params"
     """litellm.modify_params rewriting the request, like clamping max_tokens."""
     STREAMING = "streaming"
@@ -88,8 +86,6 @@ class Feature(str, Enum):
     """Anthropic tool search tools that Python maps to OpenAI tool search."""
     TOOL_SCHEMA_REPAIR = "tool_schema_repair"
     """Tool schemas that Python decodes, flattens or strips of non-Python regex patterns."""
-    MODEL_PARAM_GATING = "model_param_gating"
-    """Params that Python clamps, drops or rejects from the model map, like gpt-5 temperature."""
     WORKLOAD_IDENTITY = "workload_identity"
     """No static key, so Python mints a workload identity federation token."""
     CACHE_CONTROL_INJECTION = "cache_control_injection"
@@ -157,7 +153,6 @@ MESSAGES_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
 }
 
 RESPONSES_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
-    Feature.DROP_PARAMS,
     Feature.MODIFY_PARAMS,
     Feature.STREAMING,
     Feature.PROMPT_MANAGEMENT,
@@ -173,7 +168,6 @@ RESPONSES_PYTHON_FEATURES: Final = COMMON_PYTHON_FEATURES | {
     Feature.CACHE_CONTROL_MARKS,
     Feature.ANTHROPIC_TOOL_SEARCH,
     Feature.TOOL_SCHEMA_REPAIR,
-    Feature.MODEL_PARAM_GATING,
     Feature.WORKLOAD_IDENTITY,
 }
 

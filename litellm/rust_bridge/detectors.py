@@ -7,11 +7,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, TypeAlias, cast  # noqa: TID251  # tool lists stay caller-owned
 
 import httpx
-from pydantic import TypeAdapter
 
 import litellm
 from litellm.integrations.custom_logger import CustomLogger
-from litellm.litellm_core_utils.core_helpers import normalize_drop_params
 from litellm.rust_bridge.catalog import Feature
 from litellm.rust_bridge.public_call import NativeCall, optional_mapping, optional_sequence, optional_str
 
@@ -19,7 +17,7 @@ if TYPE_CHECKING:
     from openai.types.responses import ResponseInputParam
 
     from litellm.responses.mcp.litellm_proxy_mcp_handler import ToolParam
-    from litellm.types.llms.openai import ALL_RESPONSES_API_TOOL_PARAMS, ResponsesAPIOptionalRequestParams
+    from litellm.types.llms.openai import ALL_RESPONSES_API_TOOL_PARAMS
 
 Detector: TypeAlias = Callable[[NativeCall], bool]
 Detectors: TypeAlias = Mapping[Feature, Detector]
@@ -205,24 +203,6 @@ def tool_schema_repair(request: NativeCall) -> bool:
     return bool(tools) and sanitized is not tools
 
 
-_PARAMS: Final = TypeAdapter(dict[str, object])
-
-
-def model_param_gating(request: NativeCall) -> bool:
-    from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
-    from litellm.rust_bridge.host.routes.responses import PARAMETERS
-
-    params: Final = {name: request.resolved[name] for name in PARAMETERS if request.resolved.get(name) is not None}
-    mapped: Final = _PARAMS.validate_python(
-        OpenAIResponsesAPIConfig().map_openai_params(  # pyright: ignore[reportUnknownMemberType]  # returns a bare dict
-            cast("ResponsesAPIOptionalRequestParams", params),  # cast-ok: the handler passes these kwargs
-            _openai_model(request),
-            drop_params=True,
-        )
-    )
-    return mapped != params
-
-
 def openai_workload_identity(request: NativeCall) -> bool:
     from litellm.llms.openai.workload_identity import resolve_openai_workload_identity_config
 
@@ -269,14 +249,6 @@ def thinking_signature_retry(request: NativeCall) -> bool:
 
 def stream_cost_injection(request: NativeCall) -> bool:
     return streaming(request) and litellm.include_cost_in_streaming_usage is True
-
-
-def drop_params(request: NativeCall) -> bool:
-    return (
-        bool(litellm.drop_params)
-        or normalize_drop_params(request.resolved.get("drop_params")) is True
-        or bool(optional_sequence(request.resolved.get("additional_drop_params")))
-    )
 
 
 def modify_params(_request: NativeCall) -> bool:
