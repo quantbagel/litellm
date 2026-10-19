@@ -15,6 +15,7 @@ from litellm.rust_bridge.bindings import NativeBinding
 from litellm.rust_bridge.catalog import Feature, Route, RouteRule, Rules
 from litellm.rust_bridge.chat_completions.entrypoints import (
     NATIVE_ACOMPLETION,
+    NATIVE_COMPLETION,
     NativeAcompletion,
     NativeCompletion,
 )
@@ -314,3 +315,23 @@ def test_each_detected_feature_reaches_its_rule(
     for name, value in settings.items():
         monkeypatch.setattr(litellm, name, value)
     assert served(kwargs) is python_result
+
+
+def test_acompletion_flag_hands_off_only_when_true() -> None:
+    expected: Final = ModelResponse()
+
+    def native(call: NativeCall) -> ModelResponse:
+        return expected
+
+    async def anative(call: NativeCall) -> ModelResponse:
+        pytest.fail("completion(..., acompletion=1) stays sync, since the Python @client only hands off on is True")
+
+    NATIVE_COMPLETION.override(native)
+    NATIVE_ACOMPLETION.override(anative)
+    public_completion: Final = cast(Callable[..., object], litellm.completion)
+    try:
+        result: Final = public_completion("gpt-4o", MESSAGES, acompletion=1)
+    finally:
+        NATIVE_COMPLETION.reset()
+        NATIVE_ACOMPLETION.reset()
+    assert result is expected

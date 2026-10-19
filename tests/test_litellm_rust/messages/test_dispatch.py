@@ -349,6 +349,34 @@ async def test_anthropic_acreate_routes_through_dispatch() -> None:
     assert [request.resolved["model"] for request in captured] == ["claude-sonnet-4-5"]
 
 
+@pytest.mark.asyncio
+async def test_truthy_is_async_hands_off_to_the_async_entry_like_true() -> None:
+    captured: Final[list[NativeCall]] = []
+    expected: Final = response()
+
+    async def native(request: NativeCall) -> AnthropicMessagesResponse:
+        captured.append(request)
+        return expected
+
+    def sync_native(request: NativeCall) -> AnthropicMessagesResponse:
+        pytest.fail("a truthy is_async must hand off to the async entry, as the Python handler does")
+
+    NATIVE_AMESSAGES.override(native)
+    NATIVE_MESSAGES.override(sync_native)
+    public_create: Final = cast(Callable[..., object], litellm.anthropic.create)
+    try:
+        pending: Final = public_create(max_tokens=16, messages=MESSAGES, model="claude-sonnet-4-5", is_async=1)
+        assert inspect.isawaitable(pending)
+        assert await pending is expected
+        reference: Final = public_create(max_tokens=16, messages=MESSAGES, model="claude-sonnet-4-5", is_async=True)
+        assert inspect.isawaitable(reference)
+        assert await reference is expected
+    finally:
+        NATIVE_AMESSAGES.reset()
+        NATIVE_MESSAGES.reset()
+    assert [dict(request.resolved) for request in captured] == [dict(captured[1].resolved)] * 2
+
+
 def test_sync_messages_request_projects_public_arguments() -> None:
     rules: Final[Rules] = (RouteRule(Route.MESSAGES, Rollout.RUST_REQUIRED),)
     expected: Final = AnthropicMessagesResponse(model="claude-test")

@@ -51,7 +51,7 @@ def _python_amessages() -> PythonAmessages:
 
 _PYTHON_MESSAGES: Final = _python_messages()
 _MESSAGES: Final = signature(_PYTHON_MESSAGES)
-_FLAG: Final = AsyncFlag("is_async", sync=_MESSAGES)
+_FLAG: Final = AsyncFlag("is_async", sync=_MESSAGES, is_set=bool)
 _PYTHON_AMESSAGES: Final = _python_amessages()
 _AMESSAGES: Final = signature(_PYTHON_AMESSAGES)
 
@@ -89,10 +89,15 @@ def _resolved(request: NativeCall) -> tuple[str, str | None]:
 
 def _target(request: NativeCall, model: str, provider: str | None) -> Target:
     requested_model: Final = str(request.resolved["model"])
-    if main._native_messages_config(model, provider, request.resolved.get("model_info")) is not None:  # pyright: ignore[reportPrivateUsage]  # the handler's own passthrough lookup
+    model_info: Final = request.resolved.get("model_info")
+    api_base: Final = request.resolved.get("api_base")
+    native_config: Final = main._native_messages_config(  # pyright: ignore[reportPrivateUsage]  # the handler's own passthrough lookup
+        model, provider, model_info, api_base if isinstance(api_base, str) else None
+    )
+    if native_config is not None:
         return Target.MESSAGES
     compacting: Final = request.resolved.get("compaction") is not None
-    if not compacting and main._should_route_to_responses_api(provider, requested_model, model):  # pyright: ignore[reportPrivateUsage]  # the handler's own translation choice
+    if not compacting and main._should_route_to_responses_api(provider, requested_model, model, model_info):  # pyright: ignore[reportPrivateUsage]  # the handler's own translation choice
         return Target.RESPONSES
     return Target.CHAT_COMPLETIONS
 
