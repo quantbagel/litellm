@@ -48,7 +48,7 @@ def _python_amessages() -> PythonAmessages:
 
 _PYTHON_MESSAGES: Final = _python_messages()
 _MESSAGES: Final = signature(_PYTHON_MESSAGES)
-_FLAG: Final = AsyncFlag("is_async", sync=_MESSAGES)
+_FLAG: Final = AsyncFlag("is_async", sync=_MESSAGES, is_set=bool)
 _PYTHON_AMESSAGES: Final = _python_amessages()
 _AMESSAGES: Final = signature(_PYTHON_AMESSAGES)
 
